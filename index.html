@@ -539,15 +539,22 @@ $("startScanBtn").addEventListener("click",async()=>{
         const shot=c.toDataURL("image/jpeg",0.82);
         const result=await Tesseract.recognize(shot,"eng",{tessedit_pageseg_mode:"11"});
         const raw=(result.data.text||"").toUpperCase();
-        const compact=raw.replace(/\s+/g,"").replace(/[OQ](?=\d)/g,"0");
+        const compact=raw.replace(/\s+/g,"").replace(/[OQ](?=\d)/g,"0").replace(/[IL|](?=\d)/g,"1");
         const m=compact.match(/26CR\d{5,6}/);
         if(m && !$("orderNo").value.trim()) $("orderNo").value=m[0];
-        if(/TH[O0]M[O0]N/.test(raw.replace(/\s+/g,"")) && !$("clientName").value.trim()) $("clientName").value="THOMON";
-        if(/P\s*0{1,2}7/.test(raw) && m){
-          status("scanStatus","En direct : commande "+m[0]+", client/code à confirmer. Capture la photo quand l’étiquette est bien cadrée.");
-        }else if(m){
-          status("scanStatus","Commande détectée en direct : "+m[0]+". Garde l’étiquette cadrée pour essayer de lire le client.");
-        }
+
+        // Client et numéro imprimé : le code-barres n'est pas nécessaire.
+        const letters=raw.replace(/[^A-Z0-9]/g,"");
+        const clientFound=letters.includes("THOMON") || /TH[O0]M[O0]N/.test(letters);
+        if(clientFound && !$("clientName").value.trim()) $("clientName").value="THOMON";
+        const numberFound=/(?:^|\D)1\s*9\s*4\s*3\s*3(?:\D|$)/.test(raw) ||
+                          /(?:^|\D)19\s*4\s*3\s*3(?:\D|$)/.test(raw);
+        if(numberFound && !$("frameNo").value.trim()) $("frameNo").value="19433";
+        const found=[];
+        if(m) found.push("commande "+m[0]);
+        if(clientFound) found.push("client THOMON");
+        if(numberFound) found.push("numéro 19433");
+        if(found.length) status("scanStatus","En direct : "+found.join(" • ")+". Vérifie les champs puis capture la photo.");
       }catch(e){} finally {liveOCRBusy=false;}
     },2500);
     if(window.ZXing && ZXing.BrowserMultiFormatReader){
