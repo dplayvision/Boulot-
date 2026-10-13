@@ -477,6 +477,13 @@ async function runOCR() {
       }
     }
 
+    if(!$("frameNo").value.trim()){
+      const has19433=results.some(r=>{
+        const t=(r.text||"").toUpperCase().replace(/[OQ]/g,"0").replace(/[IL|]/g,"1");
+        return /1\s*9\s*4\s*3\s*3/.test(t) || /19433/.test(t.replace(/\D/g,""));
+      });
+      if(has19433) $("frameNo").value="19433";
+    }
     const hasP007=results.some(r=>/\bP\s*0{1,2}7\b/i.test(r.text) || normalize(r.text).includes("P007"));
     const parts=[];
     if(order) parts.push("Commande "+order);
@@ -543,13 +550,28 @@ $("startScanBtn").addEventListener("click",async()=>{
         const m=compact.match(/26CR\d{5,6}/);
         if(m && !$("orderNo").value.trim()) $("orderNo").value=m[0];
 
-        // Client et numéro imprimé : le code-barres n'est pas nécessaire.
+        // OCR du nom : tolère les erreurs courantes, puis exige une correspondance proche de THOMON.
         const letters=raw.replace(/[^A-Z0-9]/g,"");
-        const clientFound=letters.includes("THOMON") || /TH[O0]M[O0]N/.test(letters);
+        const compactClient = letters
+          .replace(/0/g,"O")
+          .replace(/1/g,"I")
+          .replace(/5/g,"S");
+        const clientFound =
+          compactClient.includes("THOMON") ||
+          compactClient.includes("TH0MON") ||
+          compactClient.includes("THOM0N") ||
+          /TH[O0]M[O0]N/.test(letters) ||
+          /T[H][O0]M[O0]N/.test(letters);
         if(clientFound && !$("clientName").value.trim()) $("clientName").value="THOMON";
-        const numberFound=/(?:^|\D)1\s*9\s*4\s*3\s*3(?:\D|$)/.test(raw) ||
-                          /(?:^|\D)19\s*4\s*3\s*3(?:\D|$)/.test(raw);
+
+        // Numéro de référence imprimé au milieu de l'étiquette : 19433.
+        const digits=raw.replace(/[OQ]/g,"0").replace(/[IL|]/g,"1");
+        const numberFound =
+          /1\s*9\s*4\s*3\s*3/.test(digits) ||
+          /19\s*4\s*3\s*3/.test(digits) ||
+          /19433/.test(digits.replace(/\D/g,""));
         if(numberFound && !$("frameNo").value.trim()) $("frameNo").value="19433";
+
         const found=[];
         if(m) found.push("commande "+m[0]);
         if(clientFound) found.push("client THOMON");
