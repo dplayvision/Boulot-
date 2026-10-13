@@ -292,38 +292,100 @@ $("clearPhotoBtn").addEventListener("click",()=>{
   $("preview").removeAttribute("src"); $("preview").style.display="none";
   status("scanStatus","Photo retirée de la fiche en cours.");
 });
+async function makeOCRVariants(dataURL) {
+  const img = new Image();
+  img.src = dataURL;
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = () => reject(new Error("Image impossible à préparer."));
+  });
+
+  const variants = [{label:"orientation originale", canvas:null}];
+  // Prépare aussi les rotations 90° et 270° pour les étiquettes photographiées verticalement.
+  for (const angle of [90, 270]) {
+    const canvas = document.createElement("canvas");
+    const w = img.naturalWidth, h = img.naturalHeight;
+    canvas.width = h; canvas.height = w;
+    const ctx = canvas.getContext("2d");
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate(angle * Math.PI / 180);
+    ctx.drawImage(img, -w / 2, -h / 2, w, h);
+    variants.push({label:`rotation ${angle}°`, canvas});
+  }
+  return variants.map(v => ({
+    label: v.label,
+    source: v.canvas ? v.canvas.toDataURL("image/jpeg", 0.92) : dataURL
+  }));
+}
+
 async function runOCR() {
   if(!currentPhoto){status("scanStatus","Prends d’abord une photo de l’étiquette.",true);return;}
   if(!window.Tesseract){status("scanStatus","Le module OCR n’a pas pu se charger. Vérifie ta connexion internet.",true);return;}
-  status("scanStatus","Lecture automatique en cours… garde l’application ouverte.");
+  status("scanStatus","Préparation de la photo pour une lecture plus précise…");
   try {
-    const result = await Tesseract.recognize(currentPhoto, "eng", { logger: m => { if(m.status === "recognizing text") status("scanStatus",`Lecture du texte… ${Math.round((m.progress||0)*100)} %`); } });
-    const text = (result.data.text || "").replace(/[\r\n]+/g," ").replace(/\s+/g," ").trim();
-    if(!text){status("scanStatus","Aucun texte reconnu. Essaie une photo plus nette et plus droite.",true);return;}
-    // Tentative de reconnaissance des champs imprimés sur l’étiquette.
-    // Le client est proposé à partir des lignes de texte qui ne sont pas des références/numéros.
-    const lines = (result.data.text || "").split(/\\r?\\n/).map(x=>x.trim()).filter(Boolean);
-    if(!$("clientName").value.trim()){
-      const clientCandidate = lines.find(line =>
-        /[A-Za-zÀ-ÿ]/.test(line) &&
-        !/26\\s*CR\\s*0?\\d{4,6}/i.test(line) &&
-        !/^[A-Z0-9 ._/-]{4,}$/.test(line) &&
-        !/^(WAKO|BELONCLE)/i.test(line)
-      );
-      if(clientCandidate) $("clientName").value = clientCandidate.slice(0,100);
+    const variants = await makeOCRVariants(currentPhoto);
+    let best = null;
+    for (let i = 0; i < variants.length; i++) {
+      const variant = variants[i];
+      status("scanStatus",`Lecture du texte : essai ${i+1}/${variants.length} (${variant.label})…`);
+      const result = await Tesseract.recognize(variant.source, "eng", {
+        logger: m => {
+          if(m.status === "recognizing text") {
+            status("scanStatus",`Lecture ${i+1}/${variants.length}… ${Math.round((m.progress||0)*100)} %`);
+          }
+        }
+      });
+      const confidence = Number(result.data.confidence || 0);
+      if (!best || confidence > best.confidence) {
+        best = {text: result.data.text || "", confidence, label: variant.label};
+      }
     }
-    // Priorité au numéro de commande WAKO du type 26CR02781.
-    const orderMatch = text.toUpperCase().replace(/O(?=\d)/g,"0").match(/\b26\s*CR\s*0?\d{4,6}\b/);
-    if(orderMatch && !$("orderNo").value.trim()) $("orderNo").value = orderMatch[0].replace(/\s+/g,"").replace("26CR","26CR");
-    // Repère une désignation de type BELONCLE_CVR 19421, en gardant une correction manuelle possible.
-    const normalized = text.toUpperCase().replace(/[–—]/g,"-");
-    const desMatch = normalized.match(/BELONCLE[ _-]*CVR\s*\d{3,6}/);
-    if(desMatch && !$("designation").value.trim()) $("designation").value = desMatch[0].replace(/BELONCLE[ _-]*CVR/,"BELONCLE_CVR ").replace(/\s+/g," ").trim();
-    // Le numéro sous le code-barres est généralement une référence alphanumérique courte.
-    const barcodeText = normalized.match(/\b81[0-9A-Z][0-9A-Z ]{3,12}\b/);
-    if(barcodeText && !$("frameNo").value.trim()) $("frameNo").value = barcodeText[0].replace(/\s+/g,"");
-    status("scanStatus","Texte lu. Vérifie les champs proposés avant d’enregistrer. Texte reconnu : "+text);
-  } catch(err) { status("scanStatus","La lecture automatique a échoué. Essaie une photo plus nette ou encode les valeurs manuellement.",true); }
+
+    const rawText = best ? best.text : "";
+    const lines = rawText.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+    const text = rawText.replace(/[\r\n]+/g," ").replace(/\s+/g," ").trim();
+    if(!text){
+      status("scanStatus","Aucun texte reconnu. Rapproche-toi de l’étiquette et évite les reflets.",true);
+      return;
+    }
+
+    // Commande : accepte les espaces ou confusions OCR courantes, mais ne remplace pas une valeur déjà saisie.
+    const normalizedText = text.toUpperCase()
+      .replace(/[–—]/g,"-")
+      .replace(/\b26\s*CR\s*O(?=\d)/g,"26CR0");
+    const orderMatch = normalizedText.match(/\b26\s*CR\s*0?\d{4,6}\b/);
+    if(orderMatch && !$("orderNo").value.trim()) {
+      $("orderNo").value = orderMatch[0].replace(/\s+/g,"");
+    }
+
+    // Désignation : ne remplit que si un motif connu est réellement reconnu.
+    const desMatch = normalizedText.match(/\bBELONCLE[ _-]*(?:CVR|CYR|CVR)\s*\d{3,6}\b/);
+    if(desMatch && !$("designation").value.trim()) {
+      $("designation").value = desMatch[0]
+        .replace(/\s+/g," ")
+        .replace(/^BELONCLE[ _-]*(CVR|CYR)/,"BELONCLE_CVR ")
+        .trim();
+    }
+
+    // Ne jamais deviner le nom du client à partir d’un texte OCR bruité.
+    // Le champ reste vide si aucun nom fiable n'est identifié, pour éviter le charabia.
+    if(!$("clientName").value.trim()) {
+      const possibleClient = lines.find(line => {
+        const candidate = line.replace(/[^A-Za-zÀ-ÿ '-]/g,"").trim();
+        return candidate.length >= 5 &&
+          candidate.split(/\s+/).length >= 2 &&
+          !/WAKO|SCHUCO|BELONCLE|THOMON|PORTE|ARRIERE|POORT/i.test(candidate) &&
+          !/\d/.test(line);
+      });
+      if(possibleClient) {
+        // Pas d'auto-remplissage du client : l'OCR de cette étiquette ne permet pas de le confirmer.
+      }
+    }
+
+    status("scanStatus",`Lecture terminée (${best.label}, confiance ${Math.round(best.confidence)} %). Vérifie les champs : seuls les formats reconnus ont été proposés. Texte détecté : ${text}`);
+  } catch(err) {
+    status("scanStatus","La lecture automatique a échoué. La photo est conservée : essaie une photo plus nette ou encode les valeurs manuellement.",true);
+  }
 }
 $("readLabelBtn").addEventListener("click",runOCR);
 $("barcodeBtn").addEventListener("click",async()=>{
