@@ -133,7 +133,10 @@ const OPS = [
 let db;
 let currentPhoto = null;
 let currentPhotoType = "image/jpeg";
-let editingId = null;\nlet liveStream = null;\nlet barcodeReader = null;\nlet scanControls = null;
+let editingId = null;
+let liveStream = null;
+let barcodeReader = null;
+let scanControls = null;
 
 const $ = id => document.getElementById(id);
 const status = (id, msg, error=false) => {
@@ -268,8 +271,11 @@ $("cameraInput").addEventListener("change",async e=>{
   try {
     currentPhoto = await readFileAsDataURL(file); currentPhotoType = file.type || "image/jpeg";
     $("preview").src=currentPhoto; $("preview").style.display="block";
-    status("scanStatus","Photo chargée depuis ta photothèque. Lecture automatique du texte en cours…");
-    await runOCR();
+    status("scanStatus","Photo chargée et affichée. Lecture automatique du texte en cours…");
+    // L’image est affichée et conservée même si le module OCR échoue.
+    try { await runOCR(); } catch(ocrError) {
+      status("scanStatus","Photo ajoutée. La lecture automatique a échoué ; tu peux lire le texte ou le code-barres manuellement.",true);
+    }
     if(window.ZXing && ZXing.BrowserMultiFormatReader){
       try{
         const reader=new ZXing.BrowserMultiFormatReader();
