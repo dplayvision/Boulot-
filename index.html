@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f3f6fb">
+<title>Scan Châssis</title>
+<style>
+:root{--bg:#f3f6fb;--card:#fff;--ink:#172033;--muted:#65718a;--line:#dfe6f0;--blue:#2563eb;--blue2:#1d4ed8;--green:#15803d;--red:#b91c1c;--shadow:0 8px 28px rgba(28,45,80,.08)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
+header{padding:24px 18px 20px;background:linear-gradient(135deg,#173b82,#2563eb);color:#fff}
+header .eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;opacity:.8;font-weight:800}
+header h1{margin:6px 0;font-size:27px;line-height:1.1}
+header p{margin:0;color:#e1eaff;font-size:14px}
+main{max-width:760px;margin:0 auto;padding:16px;display:grid;gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:var(--shadow)}
+h2{font-size:18px;margin:0 0 14px}
+label{display:block;font-weight:700;font-size:14px;margin:12px 0 6px}
+input[type=text],input[type=search],textarea{width:100%;border:1px solid #cbd5e1;border-radius:11px;padding:12px;font:inherit;background:#fff;color:var(--ink);min-height:46px}
+input:focus,textarea:focus{outline:2px solid #93c5fd;border-color:var(--blue)}
+button,.file-button{border:0;border-radius:11px;padding:12px 14px;font:inherit;font-weight:750;cursor:pointer;min-height:44px}
+.primary{background:var(--blue);color:#fff}.primary:active{background:var(--blue2)}
+.secondary{background:#e8efff;color:#1e40af}.danger{background:#fee2e2;color:#991b1b}.neutral{background:#edf1f7;color:#243047}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.actions button{flex:1}
+.hint{color:var(--muted);font-size:12px;line-height:1.45;margin:7px 0 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.op{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--line);border-radius:12px;background:#fbfcff;font-weight:650;font-size:14px;line-height:1.3}
+.op input{width:20px;height:20px;flex-shrink:0;accent-color:var(--blue);margin:0}
+#preview{width:100%;max-height:320px;object-fit:contain;background:#f1f5f9;border-radius:12px;margin-top:10px;display:none}
+#cameraInput{display:none}
+.badge{display:inline-block;border-radius:999px;background:#e8efff;color:#1d4ed8;padding:4px 9px;font-size:12px;font-weight:800}
+.record{border:1px solid var(--line);border-radius:13px;padding:12px;margin-top:10px}
+.record-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.record h3{margin:0 0 5px;font-size:16px;overflow-wrap:anywhere}
+.record p{margin:4px 0;color:var(--muted);font-size:13px;overflow-wrap:anywhere}
+.record img{width:100%;max-height:220px;object-fit:contain;border-radius:9px;background:#f1f5f9;margin-top:10px}
+.record .actions button{font-size:13px;padding:9px}
+.empty{text-align:center;padding:24px 8px;color:var(--muted)}
+.status{margin-top:10px;font-size:13px;font-weight:700}
+footer{text-align:center;color:var(--muted);font-size:12px;padding:0 20px 25px}
+@media(max-width:420px){.grid{grid-template-columns:1fr}header h1{font-size:24px}.card{padding:14px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">Atelier • Suivi de production</div>
+  <h1>📷 Scan Châssis</h1>
+  <p>Scanne l’étiquette, coche les opérations et retrouve chaque fiche.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>1. Étiquette originale</h2>
+    <label class="file-button primary" for="cameraInput" style="display:inline-flex;align-items:center;justify-content:center">📸 Photographier / choisir une photo</label>
+    <input id="cameraInput" type="file" accept="image/*" capture="environment">
+    <p class="hint">La photo originale est conservée avec la fiche dans IndexedDB. Sur iPhone, autorise l’accès à l’appareil photo si demandé.</p>
+    <img id="preview" alt="Aperçu de l’étiquette">
+    <div class="actions">
+      <button type="button" class="secondary" id="readLabelBtn">🔎 Lire le texte (si disponible)</button>
+      <button type="button" class="neutral" id="clearPhotoBtn">Retirer la photo</button>
+    </div>
+    <div class="status" id="scanStatus" aria-live="polite"></div>
+  </section>
+
+  <section class="card">
+    <h2>2. Informations de la commande</h2>
+    <label for="orderNo">Numéro de commande *</label>
+    <input id="orderNo" type="text" autocomplete="off" placeholder="Ex. : 123456">
+    <label for="frameNo">Numéro du châssis *</label>
+    <input id="frameNo" type="text" autocomplete="off" placeholder="Scanner ou encoder le numéro">
+    <p class="hint">Le numéro du châssis peut être corrigé manuellement après la lecture de l’étiquette.</p>
+  </section>
+
+  <section class="card">
+    <h2>3. Opérations à effectuer</h2>
+    <div class="grid" id="operations">
+      <label class="op"><input type="checkbox" value="Empilage"> <span>Empilage</span></label>
+      <label class="op"><input type="checkbox" value="Double empilage"> <span>Double empilage</span></label>
+      <label class="op"><input type="checkbox" value="Retour"> <span>Retour</span></label>
+      <label class="op"><input type="checkbox" value="Double retour"> <span>Double retour</span></label>
+      <label class="op"><input type="checkbox" value="Soudage / Nettoyage ouvrants"> <span>Soudage / Nettoyage ouvrants</span></label>
+      <label class="op"><input type="checkbox" value="Soudage / Nettoyage dormants"> <span>Soudage / Nettoyage dormants</span></label>
+    </div>
+    <label for="notes">Remarque (facultatif)</label>
+    <textarea id="notes" rows="2" placeholder="Une précision si nécessaire"></textarea>
+    <div class="actions">
+      <button type="button" class="primary" id="saveBtn">💾 Enregistrer la fiche</button>
+      <button type="button" class="neutral" id="resetBtn">Nouvelle fiche / Effacer</button>
+    </div>
+    <div class="status" id="formStatus" aria-live="polite"></div>
+  </section>
+
+  <section class="card">
+    <h2>4. Historique et recherche</h2>
+    <label for="searchBox">Rechercher une commande ou un châssis</label>
+    <input id="searchBox" type="search" placeholder="Tape un numéro…">
+    <div id="records"><div class="empty">Chargement des fiches…</div></div>
+    <div class="actions">
+      <button type="button" class="secondary" id="exportBtn">📤 Exporter sauvegarde</button>
+      <label class="file-button secondary" for="importInput" style="display:flex;align-items:center;justify-content:center;flex:1;margin:0">📥 Importer sauvegarde</label>
+      <input id="importInput" type="file" accept=".json,application/json" style="display:none">
+    </div>
+    <p class="hint">L’export contient les fiches et les photos. Garde le fichier dans Fichiers/iCloud ou ailleurs. L’import fusionne les fiches et ne supprime pas celles déjà présentes.</p>
+    <div class="status" id="backupStatus" aria-live="polite"></div>
+  </section>
+</main>
+<footer>Les fiches sont stockées sur cet appareil. Export régulier conseillé : le navigateur peut effacer ses données.</footer>
+
+<script>
+(() => {
+"use strict";
+const DB_NAME = "scanChassisDB";
+const DB_VERSION = 1;
+const STORE = "fiches";
+const OPS = [
+  "Empilage", "Double empilage", "Retour", "Double retour",
+  "Soudage / Nettoyage ouvrants", "Soudage / Nettoyage dormants"
+];
+let db;
+let currentPhoto = null;
+let currentPhotoType = "image/jpeg";
+let editingId = null;
+
+const $ = id => document.getElementById(id);
+const status = (id, msg, error=false) => {
+  const el = $(id); el.textContent = msg; el.style.color = error ? "#b91c1c" : "#15803d";
+};
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(STORE)) {
+        const store = database.createObjectStore(STORE, {keyPath:"id", autoIncrement:true});
+        store.createIndex("orderNo", "orderNo", {unique:false});
+        store.createIndex("frameNo", "frameNo", {unique:false});
+      }
+    };
+    request.onsuccess = () => { db = request.result; resolve(db); };
+    request.onerror = () => reject(request.error);
+  });
+}
+function allRecords() {
+  return new Promise((resolve,reject) => {
+    const tx = db.transaction(STORE,"readonly");
+    const req = tx.objectStore(STORE).getAll();
+    req.onsuccess = () => resolve(req.result.sort((a,b)=>(b.updatedAt||b.createdAt)-(a.updatedAt||a.createdAt)));
+    req.onerror = () => reject(req.error);
+  });
+}
+function saveRecord(record) {
+  return new Promise((resolve,reject) => {
+    const tx = db.transaction(STORE,"readwrite");
+    const store = tx.objectStore(STORE);
+    const req = record.id ? store.put(record) : store.add(record);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function deleteRecord(id) {
+  return new Promise((resolve,reject) => {
+    const tx = db.transaction(STORE,"readwrite");
+    const req = tx.objectStore(STORE).delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+function getRecord(id) {
+  return new Promise((resolve,reject) => {
+    const req = db.transaction(STORE,"readonly").objectStore(STORE).get(id);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function getOps() {
+  return [...document.querySelectorAll('#operations input[type="checkbox"]:checked')].map(el=>el.value);
+}
+function setOps(values) {
+  document.querySelectorAll('#operations input[type="checkbox"]').forEach(el=>el.checked=values.includes(el.value));
+}
+function resetForm() {
+  editingId = null; currentPhoto = null; currentPhotoType = "image/jpeg";
+  $("orderNo").value = ""; $("frameNo").value = ""; $("notes").value = "";
+  setOps([]); $("cameraInput").value = ""; $("preview").removeAttribute("src"); $("preview").style.display = "none";
+  $("saveBtn").textContent = "💾 Enregistrer la fiche";
+  status("formStatus","");
+  status("scanStatus","");
+}
+function loadForm(record) {
+  editingId = record.id; currentPhoto = record.photo || null; currentPhotoType = record.photoType || "image/jpeg";
+  $("orderNo").value = record.orderNo || ""; $("frameNo").value = record.frameNo || ""; $("notes").value = record.notes || "";
+  setOps(record.operations || []);
+  $("cameraInput").value = "";
+  if (currentPhoto) { $("preview").src = currentPhoto; $("preview").style.display = "block"; }
+  else { $("preview").removeAttribute("src"); $("preview").style.display = "none"; }
+  $("saveBtn").textContent = "💾 Mettre à jour la fiche";
+  status("formStatus","Fiche chargée. Les modifications seront enregistrées sur cette fiche.");
+  window.scrollTo({top:0,behavior:"smooth"});
+}
+function escapeHTML(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+}
+function renderRecord(record) {
+  const article = document.createElement("article");
+  article.className = "record";
+  const ops = (record.operations||[]).map(op=>`<span class="badge">${escapeHTML(op)}</span>`).join(" ");
+  article.innerHTML = `
+    <div class="record-top">
+      <div><h3>Commande ${escapeHTML(record.orderNo)}</h3><p>Châssis : <strong>${escapeHTML(record.frameNo)}</strong></p>
+      <p>${new Date(record.updatedAt||record.createdAt).toLocaleString("fr-BE")}</p></div>
+      <span class="badge">${(record.operations||[]).length} opération(s)</span>
+    </div>
+    <p>${ops || "Aucune opération cochée"}</p>
+    ${record.notes ? `<p>Remarque : ${escapeHTML(record.notes)}</p>` : ""}
+    ${record.photo ? `<img alt="Photo originale de l’étiquette" src="${record.photo}">` : `<p>Pas de photo enregistrée</p>`}
+    <div class="actions">
+      <button type="button" class="secondary edit">✏️ Modifier</button>
+      <button type="button" class="danger delete">🗑️ Supprimer</button>
+    </div>`;
+  article.querySelector(".edit").addEventListener("click",()=>loadForm(record));
+  article.querySelector(".delete").addEventListener("click",async()=>{
+    if (!confirm(`Supprimer la fiche commande ${record.orderNo}, châssis ${record.frameNo} ?`)) return;
+    try { await deleteRecord(record.id); await refreshRecords(); if(editingId===record.id) resetForm(); }
+    catch(e){ alert("Impossible de supprimer la fiche : "+e.message); }
+  });
+  return article;
+}
+async function refreshRecords() {
+  const container = $("records");
+  try {
+    const records = await allRecords();
+    const query = $("searchBox").value.trim().toLocaleLowerCase("fr");
+    const filtered = records.filter(r =>
+      String(r.orderNo||"").toLocaleLowerCase("fr").includes(query) ||
+      String(r.frameNo||"").toLocaleLowerCase("fr").includes(query) ||
+      (r.operations||[]).some(op=>op.toLocaleLowerCase("fr").includes(query))
+    );
+    container.replaceChildren();
+    if (!filtered.length) {
+      const empty = document.createElement("div"); empty.className="empty";
+      empty.textContent = records.length ? "Aucun résultat pour cette recherche." : "Aucune fiche enregistrée pour le moment.";
+      container.appendChild(empty); return;
+    }
+    filtered.forEach(record=>container.appendChild(renderRecord(record)));
+  } catch(e) { container.textContent="Erreur de lecture : "+e.message; }
+}
+function readFileAsDataURL(file) {
+  return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(r.error);r.readAsDataURL(file);});
+}
+$("cameraInput").addEventListener("change",async e=>{
+  const file=e.target.files && e.target.files[0]; if(!file)return;
+  try {
+    currentPhoto = await readFileAsDataURL(file); currentPhotoType = file.type || "image/jpeg";
+    $("preview").src=currentPhoto; $("preview").style.display="block";
+    status("scanStatus","Photo chargée. Elle sera conservée avec la fiche.");
+  } catch(err) { status("scanStatus","Impossible de lire la photo.",true); }
+});
+$("clearPhotoBtn").addEventListener("click",()=>{
+  currentPhoto=null; currentPhotoType="image/jpeg"; $("cameraInput").value="";
+  $("preview").removeAttribute("src"); $("preview").style.display="none";
+  status("scanStatus","Photo retirée de la fiche en cours.");
+});
+$("readLabelBtn").addEventListener("click",async()=>{
+  if(!currentPhoto){status("scanStatus","Prends d’abord une photo de l’étiquette.",true);return;}
+  if(!("TextDetector" in window)){status("scanStatus","La lecture automatique du texte n’est pas disponible dans ce navigateur. Encode le numéro du châssis manuellement.",true);return;}
+  try {
+    const img=new Image(); img.src=currentPhoto; await img.decode();
+    const detector=new TextDetector(); const results=await detector.detect(img);
+    const text=results.map(x=>x.rawValue).join(" ");
+    if(!text){status("scanStatus","Aucun texte reconnu. Encode le numéro du châssis manuellement.",true);return;}
+    const candidate=text.match(/[A-Z0-9][A-Z0-9./_-]{4,}/i);
+    if(candidate && !$("frameNo").value.trim()) $("frameNo").value=candidate[0];
+    status("scanStatus","Texte détecté : "+text+(candidate?" — vérifie le numéro proposé.":""));
+  } catch(err) { status("scanStatus","Lecture automatique indisponible. Vérifie le numéro manuellement.",true); }
+});
+$("saveBtn").addEventListener("click",async()=>{
+  const orderNo=$("orderNo").value.trim(), frameNo=$("frameNo").value.trim();
+  if(!orderNo){status("formStatus","Le numéro de commande est obligatoire.",true);$("orderNo").focus();return;}
+  if(!frameNo){status("formStatus","Le numéro du châssis est obligatoire.",true);$("frameNo").focus();return;}
+  const now=Date.now();
+  try {
+    const record={orderNo,frameNo,operations:getOps(),notes:$("notes").value.trim(),photo:currentPhoto,photoType:currentPhotoType,updatedAt:now};
+    if(editingId){record.id=editingId;const old=await getRecord(editingId);record.createdAt=old?.createdAt||now;}
+    else record.createdAt=now;
+    const id=await saveRecord(record); editingId=id;
+    status("formStatus","Fiche enregistrée avec succès, photo comprise.");
+    $("saveBtn").textContent="💾 Mettre à jour la fiche";
+    await refreshRecords();
+  } catch(e) { status("formStatus","Erreur d’enregistrement : "+e.message,true); }
+});
+$("resetBtn").addEventListener("click",()=>{
+  if(confirm("Effacer le formulaire et préparer une nouvelle fiche ?")) resetForm();
+});
+$("searchBox").addEventListener("input",refreshRecords);
+$("exportBtn").addEventListener("click",async()=>{
+  try {
+    const records=await allRecords();
+    const backup={app:"Scan Châssis",version:1,exportedAt:new Date().toISOString(),records};
+    const blob=new Blob([JSON.stringify(backup)],{type:"application/json"});
+    const url=URL.createObjectURL(blob); const a=document.createElement("a");
+    a.href=url; a.download=`scan-chassis-sauvegarde-${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
+    status("backupStatus",`${records.length} fiche(s) exportée(s), photos incluses.`);
+  } catch(e) { status("backupStatus","Échec de l’export : "+e.message,true); }
+});
+$("importInput").addEventListener("change",async e=>{
+  const file=e.target.files && e.target.files[0]; if(!file)return;
+  if(!confirm("Importer cette sauvegarde ? Les fiches existantes seront conservées. Les doublons seront ignorés.")){e.target.value="";return;}
+  try {
+    const parsed=JSON.parse(await file.text());
+    if(!parsed || !Array.isArray(parsed.records)) throw new Error("Format de sauvegarde invalide.");
+    let added=0, skipped=0;
+    for(const item of parsed.records){
+      if(!item || !item.orderNo || !item.frameNo) {skipped++;continue;}
+      const existing=await allRecords();
+      const duplicate=existing.find(r=>r.orderNo===item.orderNo && r.frameNo===item.frameNo && JSON.stringify(r.operations||[])===JSON.stringify(item.operations||[]));
+      if(duplicate){skipped++;continue;}
+      const record={orderNo:String(item.orderNo),frameNo:String(item.frameNo),operations:OPS.filter(op=>(item.operations||[]).includes(op)),notes:String(item.notes||""),photo:item.photo||null,photoType:item.photoType||"image/jpeg",createdAt:Number(item.createdAt)||Date.now(),updatedAt:Number(item.updatedAt)||Date.now()};
+      await saveRecord(record); added++;
+    }
+    await refreshRecords();
+    status("backupStatus",`Import terminé : ${added} ajoutée(s), ${skipped} ignorée(s).`);
+  } catch(err) { status("backupStatus","Import impossible : "+err.message,true); }
+  finally { e.target.value=""; }
+});
+(async()=>{
+  if(!("indexedDB" in window)){status("formStatus","IndexedDB n’est pas disponible dans ce navigateur.",true);return;}
+  try { await openDB(); await refreshRecords(); }
+  catch(e){status("formStatus","Impossible d’ouvrir la base locale : "+e.message,true);}
+})();
+})();
+</script>
+</body>
+</html>
