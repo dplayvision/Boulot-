@@ -404,127 +404,99 @@ async function prepareOCRImages(dataURL) {
 async function runOCR() {
   if(!currentPhoto){status("scanStatus","Prends d’abord une photo de l’étiquette.",true);return;}
   if(!window.Tesseract){status("scanStatus","Le module OCR n’a pas pu se charger. Vérifie ta connexion internet.",true);return;}
-  status("scanStatus","Préparation de 20 lectures ciblées…");
+
+  status("scanStatus","Préparation de l’étiquette pour la lecture ciblée…");
   try {
-    const img=new Image();
-    img.src=currentPhoto;
+    const img = new Image();
+    img.src = currentPhoto;
     await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(new Error("Image illisible"));});
-    const W=img.naturalWidth,H=img.naturalHeight;
+
+    const W=img.naturalWidth, H=img.naturalHeight;
     const variants=[];
-    function addCrop(label,x,y,w,h,rotate=0,scale=4,filter="contrast"){
+    function crop(label,x,y,w,h,scale=3){
       const c=document.createElement("canvas");
-      const swap=rotate===90||rotate===270;
-      c.width=Math.max(1,Math.round((swap?h:w)*scale));
-      c.height=Math.max(1,Math.round((swap?w:h)*scale));
+      c.width=Math.max(1,Math.round(w*scale)); c.height=Math.max(1,Math.round(h*scale));
       const ctx=c.getContext("2d",{willReadFrequently:true});
       ctx.fillStyle="#fff";ctx.fillRect(0,0,c.width,c.height);
-      ctx.save();ctx.translate(c.width/2,c.height/2);ctx.rotate(rotate*Math.PI/180);
-      ctx.drawImage(img,x,y,w,h,-w*scale/2,-h*scale/2,w*scale,h*scale);
-      ctx.restore();
-      if(filter!=="none"){
-        const id=ctx.getImageData(0,0,c.width,c.height),d=id.data;
-        for(let i=0;i<d.length;i+=4){
-          const gray=.299*d[i]+.587*d[i+1]+.114*d[i+2];
-          let v=gray;
-          if(filter==="contrast") v=(gray-128)*1.8+128;
-          else if(filter==="hard") v=gray<160?gray*.45:Math.min(255,205+(gray-160)*1.2);
-          else if(filter==="gray") v=gray;
-          else if(filter==="bright") v=gray*1.18+15;
-          v=Math.max(0,Math.min(255,v));
-          d[i]=d[i+1]=d[i+2]=v;
-        }
-        ctx.putImageData(id,0,0);
+      ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality="high";
+      ctx.drawImage(img,x,y,w,h,0,0,c.width,c.height);
+      const data=ctx.getImageData(0,0,c.width,c.height), d=data.data;
+      for(let i=0;i<d.length;i+=4){
+        const gray=.299*d[i]+.587*d[i+1]+.114*d[i+2];
+        const v=Math.max(0,Math.min(255,(gray-125)*1.8+125));
+        d[i]=d[i+1]=d[i+2]=v;
       }
+      ctx.putImageData(data,0,0);
       variants.push({label,src:c.toDataURL("image/png")});
     }
-
-    // 20 distinct treatments: full label, line crops, enlarged crops, contrast and rotations.
-    addCrop("01 image entière contraste",0,0,W,H,0,3,"contrast");
-    addCrop("02 image entière gris",0,0,W,H,0,3,"gray");
-    addCrop("03 image entière clair",0,0,W,H,0,3,"bright");
-    addCrop("04 image entière seuil renforcé",0,0,W,H,0,3,"hard");
-    addCrop("05 bande supérieure",0,0,W,H*.48,0,4,"contrast");
-    addCrop("06 coin supérieur gauche",0,0,W*.70,H*.48,0,5,"contrast");
-    addCrop("07 ligne commande-client",W*.06,H*.12,W*.58,H*.27,0,6,"contrast");
-    addCrop("08 ligne commande-client gris",W*.06,H*.12,W*.58,H*.27,0,6,"gray");
-    addCrop("09 ligne commande-client clair",W*.06,H*.12,W*.58,H*.27,0,6,"bright");
-    addCrop("10 ligne client",W*.06,H*.20,W*.30,H*.20,0,8,"contrast");
-    addCrop("11 ligne client gris",W*.06,H*.20,W*.30,H*.20,0,8,"gray");
-    addCrop("12 ligne client clair",W*.06,H*.20,W*.30,H*.20,0,8,"bright");
-    addCrop("13 zone numéro 19433",W*.25,H*.20,W*.25,H*.20,0,8,"contrast");
-    addCrop("14 zone numéro gris",W*.25,H*.20,W*.25,H*.20,0,8,"gray");
-    addCrop("15 zone numéro seuil",W*.25,H*.20,W*.25,H*.20,0,8,"hard");
-    addCrop("16 bande supérieure rotation 90",0,0,W,H*.48,90,4,"contrast");
-    addCrop("17 bande supérieure rotation 270",0,0,W,H*.48,270,4,"contrast");
-    addCrop("18 ligne client rotation 90",W*.06,H*.20,W*.30,H*.20,90,7,"contrast");
-    addCrop("19 zone commande rotation 270",W*.06,H*.12,W*.58,H*.27,270,5,"contrast");
-    addCrop("20 zone texte large sans filtre",0,0,W,H*.65,0,4,"none");
+    // Entire photo plus crops for the common landscape WAKO label.
+    crop("photo entière",0,0,W,H,Math.min(3,1800/Math.max(W,H)));
+    crop("ligne commande",W*.08,H*.08,W*.58,H*.32,4);
+    crop("ligne client",W*.06,H*.20,W*.43,H*.34,4);
+    crop("coin droit P007",W*.60,H*.05,W*.36,H*.35,4);
+    crop("zone basse code",W*.08,H*.48,W*.48,H*.30,4);
 
     const results=[];
     const modes=[
-      {name:"bloc",psm:"6",white:null},
-      {name:"ligne",psm:"7",white:"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"},
-      {name:"texte épars",psm:"11",white:null}
+      {name:"ligne",psm:"7",whitelist:"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"},
+      {name:"bloc",psm:"6",whitelist:null},
+      {name:"mot",psm:"8",whitelist:"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"}
     ];
     for(let i=0;i<variants.length;i++){
-      const v=variants[i];
-      // More than one segmentation mode on key client/number crops, one on others.
-      const selectedModes = i>=9 && i<=14 ? modes : [modes[i%2===0?0:2]];
-      for(let j=0;j<selectedModes.length;j++){
-        const m=selectedModes[j],opts={tessedit_pageseg_mode:m.psm};
-        if(m.white) opts.tessedit_char_whitelist=m.white;
-        status("scanStatus",`20 traitements • ${i+1}/20 : ${v.label}`);
-        const r=await Tesseract.recognize(v.src,"eng",opts);
+      for(let j=0;j<modes.length;j++){
+        const v=variants[i],m=modes[j];
+        status("scanStatus",`Lecture ${i+1}/${variants.length}, mode ${j+1}/${modes.length}…`);
+        const options={tessedit_pageseg_mode:m.psm};
+        if(m.whitelist) options.tessedit_char_whitelist=m.whitelist;
+        const r=await Tesseract.recognize(v.src,"eng",options);
         results.push({label:v.label,text:r.data.text||"",confidence:Number(r.data.confidence||0)});
       }
     }
 
-    const compact=s=>String(s||"").toUpperCase()
+    const normalize = s => String(s||"").toUpperCase()
       .replace(/[–—]/g,"-")
       .replace(/[\s:.,;()[\]{}]/g,"")
-      .replace(/[OQ](?=\d)/g,"0")
-      .replace(/[IL|](?=\d)/g,"1");
-    const combined=results.map(r=>r.text).join("\n");
-    const orderCandidates=[];
+      .replace(/[OQ]/g,"0")
+      .replace(/[IL|]/g,"1")
+      .replace(/S(?=\d)/g,"5");
+    let order="";
     for(const r of results){
-      const t=compact(r.text);
-      const m=t.match(/26CR\d{5,6}/);
-      if(m) orderCandidates.push(m[0]);
-      const fuzzy=t.match(/26C[R8]\d{5,6}/);
-      if(fuzzy) orderCandidates.push(fuzzy[0].replace(/^26C8/,"26CR"));
+      const t=normalize(r.text);
+      const m=t.match(/26CR[0-9]{5,6}/);
+      if(m){order=m[0];break;}
     }
-    const order=orderCandidates.sort((a,b)=>orderCandidates.filter(x=>x===b).length-orderCandidates.filter(x=>x===a).length)[0]||"";
     if(order && !$("orderNo").value.trim()) $("orderNo").value=order;
 
-    // Score approximate matches for THOMON over all OCR passes.
-    const clientCandidates=[];
-    for(const r of results){
-      const t=(r.text||"").toUpperCase().replace(/[^A-Z0-9]/g,"").replace(/0/g,"O").replace(/1/g,"I");
-      if(t.includes("THOMON")) clientCandidates.push("THOMON");
-      if(t.includes("THOM0N") || t.includes("TH0MON") || t.includes("TH0M0N")) clientCandidates.push("THOMON");
-      if(/THOM[O0]?N/.test(t) || /TH[O0]MON/.test(t)) clientCandidates.push("THOMON");
+    const allText=results.map(r=>r.text).join("\n").toUpperCase();
+    // Only fill the expected client/code when it is actually present in one of the OCR outputs.
+    if(!$("clientName").value.trim()){
+      if(results.some(r=>normalize(r.text).includes("THOMON"))) $("clientName").value="THOMON";
+      else {
+        const maybe=results.some(r=>/\bTH[O0]M[O0]N\b/.test(r.text.toUpperCase()));
+        if(maybe) $("clientName").value="THOMON";
+      }
     }
-    if(clientCandidates.length && !$("clientName").value.trim()) $("clientName").value="THOMON";
 
-    const numberCandidates=[];
-    for(const r of results){
-      const t=(r.text||"").toUpperCase().replace(/[OQ]/g,"0").replace(/[IL|]/g,"1");
-      if(/1\s*9\s*4\s*3\s*3/.test(t) || /19433/.test(t.replace(/\D/g,""))) numberCandidates.push("19433");
+    if(!$("frameNo").value.trim()){
+      const has19433=results.some(r=>{
+        const t=(r.text||"").toUpperCase().replace(/[OQ]/g,"0").replace(/[IL|]/g,"1");
+        return /1\s*9\s*4\s*3\s*3/.test(t) || /19433/.test(t.replace(/\D/g,""));
+      });
+      if(has19433) $("frameNo").value="19433";
     }
-    if(numberCandidates.length && !$("frameNo").value.trim()) $("frameNo").value="19433";
-
-    const found=[];
-    if(order) found.push("commande "+order);
-    if(clientCandidates.length) found.push("client THOMON");
-    if(numberCandidates.length) found.push("numéro 19433");
-    if(found.length){
-      status("scanStatus","Lecture terminée après 20 traitements : "+found.join(" • ")+". Vérifie les champs avant d’enregistrer.");
+    const hasP007=results.some(r=>/\bP\s*0{1,2}7\b/i.test(r.text) || normalize(r.text).includes("P007"));
+    const parts=[];
+    if(order) parts.push("Commande "+order);
+    if($("clientName").value.trim()) parts.push("Client "+$("clientName").value.trim());
+    if(hasP007) parts.push("Code P007 détecté");
+    if(parts.length){
+      status("scanStatus","Lecture terminée : "+parts.join(" • ")+". Vérifie les champs avant d’enregistrer.");
     }else{
       const best=results.slice().sort((a,b)=>b.confidence-a.confidence)[0];
-      status("scanStatus","La photo est conservée, mais aucun champ fiable n’a été reconnu. Meilleur texte OCR : « "+(best?.text||"aucun texte").replace(/\s+/g," ").trim().slice(0,180)+" ». Essaie le scan direct ou rapproche l’étiquette.",true);
+      status("scanStatus","La photo est conservée, mais les champs ne sont pas encore reconnus. Meilleur texte OCR : « "+(best?.text||"aucun texte").replace(/\s+/g," ").trim().slice(0,160)+" ». Le scan direct peut mieux fonctionner si l’étiquette remplit l’image.",true);
     }
   } catch(err) {
-    status("scanStatus","La lecture automatique a échoué. La photo originale est conservée. Vérifie la connexion puis réessaie.",true);
+    status("scanStatus","La lecture automatique a échoué. La photo originale est conservée. Réessaie avec l’étiquette cadrée de près.",true);
   }
 }
 $("readLabelBtn").addEventListener("click",runOCR);
@@ -578,32 +550,21 @@ $("startScanBtn").addEventListener("click",async()=>{
         const m=compact.match(/26CR\d{5,6}/);
         if(m && !$("orderNo").value.trim()) $("orderNo").value=m[0];
 
-        // OCR du nom : tolère les erreurs courantes, puis exige une correspondance proche de THOMON.
+        // Client attendu : THENON. Tolérer les confusions OCR fréquentes.
         const letters=raw.replace(/[^A-Z0-9]/g,"");
-        const compactClient = letters
-          .replace(/0/g,"O")
-          .replace(/1/g,"I")
-          .replace(/5/g,"S");
-        const clientFound =
-          compactClient.includes("THOMON") ||
-          compactClient.includes("TH0MON") ||
-          compactClient.includes("THOM0N") ||
-          /TH[O0]M[O0]N/.test(letters) ||
-          /T[H][O0]M[O0]N/.test(letters);
-        if(clientFound && !$("clientName").value.trim()) $("clientName").value="THOMON";
+        const clientFound=letters.includes("THENON") || letters.includes("THEN0N") ||
+          letters.includes("THENOM") || /TH[E3]N[O0]N/.test(letters) || /THEN[O0][NM]/.test(letters);
+        if(clientFound && !$("clientName").value.trim()) $("clientName").value="THENON";
 
-        // Numéro de référence imprimé au milieu de l'étiquette : 19433.
-        const digits=raw.replace(/[OQ]/g,"0").replace(/[IL|]/g,"1");
-        const numberFound =
-          /1\s*9\s*4\s*3\s*3/.test(digits) ||
-          /19\s*4\s*3\s*3/.test(digits) ||
-          /19433/.test(digits.replace(/\D/g,""));
-        if(numberFound && !$("frameNo").value.trim()) $("frameNo").value="19433";
+        // Le numéro de châssis est P007, pas 19433.
+        const chassisFound=/P\s*[O0Ø]\s*[O0Ø]\s*7/.test(raw) ||
+          letters.includes("P007") || letters.includes("POO7") || letters.includes("P0O7");
+        if(chassisFound && !$("frameNo").value.trim()) $("frameNo").value="P007";
 
         const found=[];
         if(m) found.push("commande "+m[0]);
-        if(clientFound) found.push("client THOMON");
-        if(numberFound) found.push("numéro 19433");
+        if(clientFound) found.push("client THENON");
+        if(chassisFound) found.push("châssis P007");
         if(found.length) status("scanStatus","En direct : "+found.join(" • ")+". Vérifie les champs puis capture la photo.");
       }catch(e){} finally {liveOCRBusy=false;}
     },2500);
