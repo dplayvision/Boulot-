@@ -271,19 +271,11 @@ $("cameraInput").addEventListener("change",async e=>{
     currentPhoto = await readFileAsDataURL(file); currentPhotoType = file.type || "image/jpeg";
     $("preview").src=currentPhoto; $("preview").style.display="block";
     status("scanStatus","Photo chargée et affichée. Lecture automatique du texte en cours…");
-    // L’image est affichée et conservée même si le module OCR échoue.
     try { await runOCR(); } catch(ocrError) {
       status("scanStatus","Photo ajoutée. La lecture automatique a échoué ; tu peux lire le texte ou le code-barres manuellement.",true);
     }
-    if(window.ZXing && ZXing.BrowserMultiFormatReader){
-      try{
-        const reader=new ZXing.BrowserMultiFormatReader();
-        const result=await reader.decodeFromImageUrl(currentPhoto);
-        const value=result.getText();
-        $("frameNo").value=value;
-        status("scanStatus","Photo analysée. Code-barres détecté : "+value+". Vérifie les champs.");
-      }catch(err){ /* Aucun code-barres : le texte OCR reste utilisable. */ }
-    }
+    // Ne pas remplacer automatiquement le numéro de châssis par le contenu du code-barres.
+    // Le champ châssis doit venir de la zone de texte imprimée en haut à droite.
   } catch(err) { status("scanStatus","Impossible de lire la photo.",true); }
 });
 $("clearPhotoBtn").addEventListener("click",()=>{
@@ -305,10 +297,8 @@ async function makeOCRVariants(dataURL) {
     source: canvas.toDataURL("image/jpeg", 0.96)
   });
 
-  // Originale : garder une version de référence.
   variants.push({label:"photo originale", source:dataURL});
 
-  // Agrandissement + niveaux de gris + contraste : améliore souvent les petites étiquettes.
   for (const angle of [0, 90, 270]) {
     const rotated = document.createElement("canvas");
     const w = img.naturalWidth, h = img.naturalHeight;
@@ -333,7 +323,6 @@ async function makeOCRVariants(dataURL) {
     const d = imageData.data;
     for(let i=0;i<d.length;i+=4){
       const gray = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-      // contraste renforcé, tout en gardant les traits fins des caractères.
       let v = (gray-128)*1.65+128;
       v = Math.max(0,Math.min(255,v));
       d[i]=d[i+1]=d[i+2]=v;
@@ -377,7 +366,6 @@ async function prepareOCRImages(dataURL) {
       const d = imageData.data;
       for (let i=0; i<d.length; i+=4) {
         const gray = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-        // High contrast, retaining dark print while whitening the label background.
         const value = gray < 145 ? Math.max(0, gray*0.72) : Math.min(255, 180 + (gray-145)*1.35);
         d[i] = d[i+1] = d[i+2] = value;
       }
@@ -386,14 +374,10 @@ async function prepareOCRImages(dataURL) {
     variants.push({label, source:canvas.toDataURL("image/png")});
   }
 
-  // Whole image, plus central crops: this also works when the user photographs the frame around the label.
   addCanvas("image agrandie", 0, 0, W, H, 0, true);
   addCanvas("zone centrale", W*0.03, H*0.08, W*0.94, H*0.84, 0, true);
   addCanvas("rotation 90°", 0, 0, W, H, 90, true);
   addCanvas("rotation 270°", 0, 0, W, H, 270, true);
-
-  // Targeted regions for the common WAKO label layout.
-  // Run each crop in both normal and contrast-enhanced form.
   addCanvas("zone numéro commande", W*0.08, H*0.10, W*0.62, H*0.42, 0, true);
   addCanvas("zone texte client", W*0.05, H*0.25, W*0.50, H*0.42, 0, true);
   addCanvas("zone texte sous code-barres", W*0.10, H*0.55, W*0.55, H*0.35, 0, true);
@@ -402,144 +386,139 @@ async function prepareOCRImages(dataURL) {
 }
 
 async function runOCR() {
-  if(!currentPhoto){status("scanStatus","Prends d’abord une photo de l’étiquette.",true);return;}
-  if(!window.Tesseract){status("scanStatus","Le module OCR n’a pas pu se charger. Vérifie ta connexion internet.",true);return;}
+  if (!currentPhoto) {
+    status("scanStatus", "Prends d’abord une photo de l’étiquette.", true);
+    return;
+  }
+  if (!window.Tesseract) {
+    status("scanStatus", "Le module OCR n’a pas pu se charger. Vérifie ta connexion.", true);
+    return;
+  }
 
-  status("scanStatus","Préparation de l’étiquette pour la lecture ciblée…");
+  status("scanStatus", "Lecture ciblée de la commande, du client et du châssis…");
+
   try {
     const img = new Image();
     img.src = currentPhoto;
-    await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(new Error("Image illisible"));});
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error("Image illisible"));
+    });
 
-    const W=img.naturalWidth, H=img.naturalHeight;
-    const variants=[];
-    function crop(label,x,y,w,h,scale=3){
-      const c=document.createElement("canvas");
-      c.width=Math.max(1,Math.round(w*scale)); c.height=Math.max(1,Math.round(h*scale));
-      const ctx=c.getContext("2d",{willReadFrequently:true});
-      ctx.fillStyle="#fff";ctx.fillRect(0,0,c.width,c.height);
-      ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality="high";
-      ctx.drawImage(img,x,y,w,h,0,0,c.width,c.height);
-      const data=ctx.getImageData(0,0,c.width,c.height), d=data.data;
-      for(let i=0;i<d.length;i+=4){
-        const gray=.299*d[i]+.587*d[i+1]+.114*d[i+2];
-        const v=Math.max(0,Math.min(255,(gray-125)*1.8+125));
-        d[i]=d[i+1]=d[i+2]=v;
+    const W = img.naturalWidth;
+    const H = img.naturalHeight;
+
+    function prepareCrop(x, y, w, h, scale = 4) {
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(w * scale);
+      canvas.height = Math.round(h * scale);
+
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(img, x, y, w, h, 0, 0, canvas.width, canvas.height);
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const d = imageData.data;
+
+      for (let i = 0; i < d.length; i += 4) {
+        const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        const value = Math.max(0, Math.min(255, (gray - 128) * 1.7 + 128));
+        d[i] = d[i + 1] = d[i + 2] = value;
       }
-      ctx.putImageData(data,0,0);
-      variants.push({label,src:c.toDataURL("image/png")});
-    }
-    // Entire photo plus crops for the common landscape WAKO label.
-    crop("photo entière",0,0,W,H,Math.min(3,1800/Math.max(W,H)));
-    crop("ligne commande",W*.08,H*.08,W*.58,H*.32,4);
-    crop("ligne client",W*.06,H*.20,W*.43,H*.34,4);
-    crop("zone châssis en haut à droite",W*.58,H*.03,W*.40,H*.40,5);
-    crop("zone basse code",W*.08,H*.48,W*.48,H*.30,4);
 
-    const results=[];
-    const modes=[
-      {name:"ligne",psm:"7",whitelist:"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"},
-      {name:"bloc",psm:"6",whitelist:null},
-      {name:"mot",psm:"8",whitelist:"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"}
-    ];
-    for(let i=0;i<variants.length;i++){
-      for(let j=0;j<modes.length;j++){
-        const v=variants[i],m=modes[j];
-        status("scanStatus",`Lecture ${i+1}/${variants.length}, mode ${j+1}/${modes.length}…`);
-        const options={tessedit_pageseg_mode:m.psm};
-        if(m.whitelist) options.tessedit_char_whitelist=m.whitelist;
-        const r=await Tesseract.recognize(v.src,"eng",options);
-        results.push({label:v.label,text:r.data.text||"",confidence:Number(r.data.confidence||0)});
-      }
+      ctx.putImageData(imageData, 0, 0);
+      return canvas;
     }
 
-    const normalize = s => String(s||"").toUpperCase()
-      .replace(/[–—]/g,"-")
-      .replace(/[\s:.,;()[\]{}]/g,"")
-      .replace(/[OQ](?=\d)/g,"0")
-      .replace(/[IL|](?=\d)/g,"1")
-      .replace(/S(?=\d)/g,"5");
-
-    // Commande : le numéro en gras en haut à gauche. Accepte les références alphanumériques
-    // de type 26CR02833 sans coder un numéro précis.
-    const orderResults=results.filter(r=>r.label==="ligne commande" || r.label==="photo entière");
-    let order="";
-    for(const r of [...orderResults,...results]){
-      const t=normalize(r.text);
-      const m=t.match(/\d{2}CR\d{4,8}/);
-      if(m){order=m[0];break;}
-    }
-    if(order) $("orderNo").value=order;
-
-    // Client : texte lisible sous la commande, dans la zone gauche.
-    // On cherche une ligne alphabétique, sans chiffres dominants ni mots génériques de l'étiquette.
-    const clientResults=results.filter(r=>r.label==="ligne client");
-    const ignored=/^(WAKO|PORTEARRIERE|PORTEAVANT|P007|G|TH|CODEBARRE|BELGIQUE)$/i;
-    function clientCandidate(text){
-      const lines=String(text||"").split(/\n+/).map(s=>s.trim().replace(/^[^A-ZÀ-Ÿ]+/i,"").replace(/[^A-ZÀ-Ÿ' -]/gi,"").trim()).filter(Boolean);
-      for(const line of lines){
-        const words=line.split(/\s+/).filter(Boolean);
-        const letters=line.replace(/[^A-ZÀ-Ÿ]/gi,"");
-        if(letters.length>=4 && letters.length<=24 && !/\d/.test(line) &&
-           !ignored.test(line.replace(/\s/g,"")) &&
-           !/PORTE|WAKO|ARRIERE|AVANT/i.test(line)){
-          return line.replace(/\s+/g," ").toUpperCase();
+    async function readCrop(canvas, whitelist, psm = "7") {
+      const result = await Tesseract.recognize(
+        canvas.toDataURL("image/png"),
+        "eng",
+        {
+          tessedit_pageseg_mode: psm,
+          preserve_interword_spaces: "1",
+          ...(whitelist ? { tessedit_char_whitelist: whitelist } : {})
         }
-      }
-      return "";
+      );
+      return (result.data.text || "").trim();
     }
-    let client="";
-    for(const r of clientResults){
-      const raw=String(r.text||"").toUpperCase();
-      const compact=raw.replace(/[^A-Z0-9À-Ÿ]/g,"");
-      // OCR may confuse similar letters; use the client line's text, not a fixed customer name.
-      const lines=raw.split(/\n+/).map(s=>s.trim()).filter(Boolean);
-      for(const line of lines){
-        const candidate=line.replace(/[^A-ZÀ-Ÿ' -]/gi," ").replace(/\s+/g," ").trim();
-        const letters=candidate.replace(/[^A-ZÀ-Ÿ]/gi,"");
-        if(letters.length>=4 && letters.length<=20 && !/\d/.test(line) &&
-           !/WAKO|PORTE|ARRIERE|AVANT|CODEBARRE/i.test(candidate)){
-          client=candidate.toUpperCase();
-          break;
-        }
-      }
-      if(!client && /TH[E3]N[O0][NM]/.test(compact)) client="THENON";
-      if(client) break;
-    }
-    if(client) $("clientName").value=client;
 
-    // Châssis : code alphanumérique dans le coin supérieur droit.
-    // Prend le code court du coin, sans confondre les nombres isolés de la zone centrale.
-    const chassisResults=results.filter(r=>r.label==="zone châssis en haut à droite");
-    let chassis="";
-    for(const r of chassisResults){
-      const lines=String(r.text||"").toUpperCase().split(/\n+/);
-      for(const line of lines){
-        const candidates=line.match(/[A-ZØ][A-ZØ0-9]{1,7}/g)||[];
-        const candidate=candidates.find(v=>{
-          const compact=v.replace(/Ø/g,"0");
-          return /[A-Z]/.test(compact) && /\d/.test(compact) &&
-            !/WAKO|PORTE|ARRIERE|AVANT|BELONCLE/.test(compact) &&
-            compact.length>=3 && compact.length<=6;
-        });
-        if(candidate){chassis=candidate.replace(/Ø/g,"0").replace(/^P0O/,"P00");break;}
-      }
-      if(chassis) break;
-    }
-    if(chassis) $("frameNo").value=chassis;
+    const orderCrop = prepareCrop(W * 0.05, H * 0.05, W * 0.62, H * 0.38, 4);
+    const clientCrop = prepareCrop(W * 0.04, H * 0.20, W * 0.55, H * 0.42, 4);
+    const chassisCrop = prepareCrop(W * 0.58, H * 0.02, W * 0.40, H * 0.40, 5);
 
-    const parts=[];
-    if(order) parts.push("Commande "+order);
-    if(client) parts.push("Client "+client);
-    if(chassis) parts.push("Châssis "+chassis);
-    if(parts.length){
-      status("scanStatus","Lecture terminée : "+parts.join(" • ")+". Vérifie les champs avant d’enregistrer.");
-    }else{
-      const best=results.slice().sort((a,b)=>b.confidence-a.confidence)[0];
-      status("scanStatus","Photo conservée, mais les champs ne sont pas assez fiables. Meilleur texte OCR : « "+(best?.text||"aucun texte").replace(/\s+/g," ").trim().slice(0,160)+" ». Cadre l’étiquette entière, bien droite et nette.",true);
+    status("scanStatus", "Lecture du numéro de commande…");
+    const orderText = await readCrop(
+      orderCrop,
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+      "6"
+    );
+
+    status("scanStatus", "Lecture du nom du client…");
+    const clientText = await readCrop(
+      clientCrop,
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸ'- ",
+      "6"
+    );
+
+    status("scanStatus", "Lecture du numéro de châssis…");
+    const chassisText = await readCrop(
+      chassisCrop,
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+      "8"
+    );
+
+    const orderCompact = orderText.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const orderMatch = orderCompact.match(/[0-9]{2}CR[0-9]{4,8}/);
+
+    const clientLines = clientText
+      .toUpperCase()
+      .split(/\n+/)
+      .map(line => line.replace(/[^A-ZÀ-Ÿ' -]/g, " ").replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+
+    const ignored = /WAKO|PORTE|ARRIERE|AVANT|CODE|BARRE|CHASSIS|COMMANDE/;
+    const client = clientLines.find(line => {
+      const letters = line.replace(/[^A-ZÀ-Ÿ]/g, "");
+      return letters.length >= 4 &&
+        letters.length <= 24 &&
+        !ignored.test(line);
+    }) || "";
+
+    const chassisCompact = chassisText.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const chassisMatch = chassisCompact.match(/P[0-9]{3}/);
+
+    if (orderMatch) $("orderNo").value = orderMatch[0];
+    if (client) $("clientName").value = client;
+    if (chassisMatch) $("frameNo").value = chassisMatch[0];
+
+    const found = [];
+    if (orderMatch) found.push("Commande : " + orderMatch[0]);
+    if (client) found.push("Client : " + client);
+    if (chassisMatch) found.push("Châssis : " + chassisMatch[0]);
+
+    if (found.length) {
+      status(
+        "scanStatus",
+        "Lecture terminée : " + found.join(" • ") +
+        ". Vérifie les champs avant d’enregistrer."
+      );
+    } else {
+      status(
+        "scanStatus",
+        "Aucun résultat suffisamment fiable. Garde la photo, cadre l’étiquette entière et bien droite, puis réessaie.",
+        true
+      );
     }
-  } catch(err) {
-    status("scanStatus","La lecture automatique a échoué. La photo originale est conservée. Réessaie avec l’étiquette cadrée de près.",true);
+  } catch (err) {
+    status(
+      "scanStatus",
+      "La lecture a échoué. La photo originale est conservée. Réessaie avec une photo nette.",
+      true
+    );
   }
 }
 $("readLabelBtn").addEventListener("click",runOCR);
@@ -576,8 +555,7 @@ $("startScanBtn").addEventListener("click",async()=>{
     liveStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false});
     video.srcObject=liveStream; video.style.display="block"; await video.play();
     $("captureBtn").disabled=false; $("stopScanBtn").disabled=false;
-    status("scanStatus","Caméra ouverte. Recherche en direct du numéro, du client THOMON et du code P007…");
-    // OCR léger en direct toutes les 2,5 secondes, sans bloquer la capture ni le lecteur de code-barres.
+    status("scanStatus","Caméra ouverte. Recherche en direct de la commande, du client et du code châssis…");
     liveOCRTimer=setInterval(async()=>{
       if(liveOCRBusy || !video.videoWidth || !window.Tesseract) return;
       liveOCRBusy=true;
@@ -601,9 +579,11 @@ $("startScanBtn").addEventListener("click",async()=>{
         });
         if(clientLine) $("clientName").value=clientLine.replace(/[^A-ZÀ-Ÿ' -]/gi,"").trim();
 
-        const chassisMatch=raw.match(/\b[A-ZØ][A-ZØ0-9]{1,5}\b/g)||[];
-        const chassis=chassisMatch.find(x=>/[A-Z]/i.test(x)&&/\d/.test(x)&&! /WAKO|PORTE|ARRIERE|AVANT/i.test(x));
-        if(chassis) $("frameNo").value=chassis.replace(/Ø/g,"0");
+        // Ne retenir que le format court attendu pour le châssis, plutôt que n'importe quel mot mêlé de chiffres.
+        const chassisCompact=raw.replace(/[^A-Z0-9]/g,"");
+        const chassisMatch=chassisCompact.match(/P[0-9]{3}/);
+        const chassis=chassisMatch ? chassisMatch[0] : "";
+        if(chassis) $("frameNo").value=chassis;
 
         const found=[];
         if(orderMatch) found.push("commande "+orderMatch[0]);
