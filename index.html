@@ -135,6 +135,8 @@ let editingId = null;
 let liveStream = null;
 let barcodeReader = null;
 let scanControls = null;
+let liveOCRTimer = null;
+let liveOCRBusy = false;
 
 const $ = id => document.getElementById(id);
 const status = (id, msg, error=false) => {
@@ -402,66 +404,92 @@ async function prepareOCRImages(dataURL) {
 async function runOCR() {
   if(!currentPhoto){status("scanStatus","Prends d’abord une photo de l’étiquette.",true);return;}
   if(!window.Tesseract){status("scanStatus","Le module OCR n’a pas pu se charger. Vérifie ta connexion internet.",true);return;}
-  status("scanStatus","Lecture ciblée de l’étiquette…");
-  try {
-    const variants = await prepareOCRImages(currentPhoto);
-    const results = [];
-    // Le numéro de commande est imprimé en gros caractères : le traiter comme une ligne,
-    // avec une whitelist alphanumérique, est plus adapté que la lecture de toute la page.
-    const modes = [
-      {name:"texte normal", psm:"6", whitelist:null},
-      {name:"ligne de commande", psm:"7", whitelist:"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"},
-      {name:"mot unique", psm:"8", whitelist:"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"},
-      {name:"bloc brut", psm:"11", whitelist:null}
-    ];
-    const selected = [
-      variants.find(v=>v.label==="zone numéro commande"),
-      variants.find(v=>v.label==="image agrandie"),
-      variants.find(v=>v.label==="zone centrale"),
-      variants.find(v=>v.label==="zone texte client")
-    ].filter(Boolean);
 
-    for(let i=0;i<selected.length;i++){
-      const v=selected[i];
+  status("scanStatus","Préparation de l’étiquette pour la lecture ciblée…");
+  try {
+    const img = new Image();
+    img.src = currentPhoto;
+    await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(new Error("Image illisible"));});
+
+    const W=img.naturalWidth, H=img.naturalHeight;
+    const variants=[];
+    function crop(label,x,y,w,h,scale=3){
+      const c=document.createElement("canvas");
+      c.width=Math.max(1,Math.round(w*scale)); c.height=Math.max(1,Math.round(h*scale));
+      const ctx=c.getContext("2d",{willReadFrequently:true});
+      ctx.fillStyle="#fff";ctx.fillRect(0,0,c.width,c.height);
+      ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality="high";
+      ctx.drawImage(img,x,y,w,h,0,0,c.width,c.height);
+      const data=ctx.getImageData(0,0,c.width,c.height), d=data.data;
+      for(let i=0;i<d.length;i+=4){
+        const gray=.299*d[i]+.587*d[i+1]+.114*d[i+2];
+        const v=Math.max(0,Math.min(255,(gray-125)*1.8+125));
+        d[i]=d[i+1]=d[i+2]=v;
+      }
+      ctx.putImageData(data,0,0);
+      variants.push({label,src:c.toDataURL("image/png")});
+    }
+    // Entire photo plus crops for the common landscape WAKO label.
+    crop("photo entière",0,0,W,H,Math.min(3,1800/Math.max(W,H)));
+    crop("ligne commande",W*.08,H*.08,W*.58,H*.32,4);
+    crop("ligne client",W*.06,H*.20,W*.43,H*.34,4);
+    crop("coin droit P007",W*.60,H*.05,W*.36,H*.35,4);
+    crop("zone basse code",W*.08,H*.48,W*.48,H*.30,4);
+
+    const results=[];
+    const modes=[
+      {name:"ligne",psm:"7",whitelist:"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"},
+      {name:"bloc",psm:"6",whitelist:null},
+      {name:"mot",psm:"8",whitelist:"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"}
+    ];
+    for(let i=0;i<variants.length;i++){
       for(let j=0;j<modes.length;j++){
-        const mode=modes[j];
-        status("scanStatus",`Lecture ciblée ${i+1}/${selected.length} • méthode ${j+1}/${modes.length}…`);
-        const options={tessedit_pageseg_mode:mode.psm};
-        if(mode.whitelist) options.tessedit_char_whitelist=mode.whitelist;
-        const result=await Tesseract.recognize(v.source,"eng",options);
-        results.push({label:v.label,mode:mode.name,text:result.data.text||"",confidence:Number(result.data.confidence||0)});
+        const v=variants[i],m=modes[j];
+        status("scanStatus",`Lecture ${i+1}/${variants.length}, mode ${j+1}/${modes.length}…`);
+        const options={tessedit_pageseg_mode:m.psm};
+        if(m.whitelist) options.tessedit_char_whitelist=m.whitelist;
+        const r=await Tesseract.recognize(v.src,"eng",options);
+        results.push({label:v.label,text:r.data.text||"",confidence:Number(r.data.confidence||0)});
       }
     }
 
-    // Examine each OCR result separately so line breaks from another pass cannot hide the code.
+    const normalize = s => String(s||"").toUpperCase()
+      .replace(/[–—]/g,"-")
+      .replace(/[\s:.,;()[\]{}]/g,"")
+      .replace(/[OQ]/g,"0")
+      .replace(/[IL|]/g,"1")
+      .replace(/S(?=\d)/g,"5");
     let order="";
     for(const r of results){
-      const cleaned=(r.text||"").toUpperCase()
-        .replace(/[–—]/g,"-")
-        .replace(/[\s:._-]+/g,"")
-        .replace(/[OQ]/g,"0")
-        .replace(/[IL]/g,"1");
-      const match=cleaned.match(/26CR[0-9]{5,6}/);
-      if(match){order=match[0];break;}
+      const t=normalize(r.text);
+      const m=t.match(/26CR[0-9]{5,6}/);
+      if(m){order=m[0];break;}
     }
     if(order && !$("orderNo").value.trim()) $("orderNo").value=order;
 
-    // Client name is only filled for the known visible code if an OCR pass confirms it.
+    const allText=results.map(r=>r.text).join("\n").toUpperCase();
+    // Only fill the expected client/code when it is actually present in one of the OCR outputs.
     if(!$("clientName").value.trim()){
-      const hasThomon=results.some(r=>/THOMON/i.test((r.text||"").replace(/[^A-Z]/gi,"")));
-      if(hasThomon) $("clientName").value="THOMON";
+      if(results.some(r=>normalize(r.text).includes("THOMON"))) $("clientName").value="THOMON";
+      else {
+        const maybe=results.some(r=>/\bTH[O0]M[O0]N\b/.test(r.text.toUpperCase()));
+        if(maybe) $("clientName").value="THOMON";
+      }
     }
 
-    // If the OCR still misses the command, don't silently pretend it worked.
-    if(order){
-      status("scanStatus",`Commande détectée : ${order}. Vérifie le numéro et complète le châssis si nécessaire.`);
+    const hasP007=results.some(r=>/\bP\s*0{1,2}7\b/i.test(r.text) || normalize(r.text).includes("P007"));
+    const parts=[];
+    if(order) parts.push("Commande "+order);
+    if($("clientName").value.trim()) parts.push("Client "+$("clientName").value.trim());
+    if(hasP007) parts.push("Code P007 détecté");
+    if(parts.length){
+      status("scanStatus","Lecture terminée : "+parts.join(" • ")+". Vérifie les champs avant d’enregistrer.");
     }else{
       const best=results.slice().sort((a,b)=>b.confidence-a.confidence)[0];
-      const sample=best?(best.text||"").replace(/\s+/g," ").trim().slice(0,120):"";
-      status("scanStatus",`La photo est conservée, mais le numéro de commande n’a pas été reconnu. Résultat OCR de contrôle : « ${sample||"aucun texte"} ». Essaie de cadrer uniquement l’étiquette, bien nette et sans reflet.`,true);
+      status("scanStatus","La photo est conservée, mais les champs ne sont pas encore reconnus. Meilleur texte OCR : « "+(best?.text||"aucun texte").replace(/\s+/g," ").trim().slice(0,160)+" ». Le scan direct peut mieux fonctionner si l’étiquette remplit l’image.",true);
     }
   } catch(err) {
-    status("scanStatus","La lecture automatique a échoué. La photo originale est conservée. Vérifie la connexion et réessaie.",true);
+    status("scanStatus","La lecture automatique a échoué. La photo originale est conservée. Réessaie avec l’étiquette cadrée de près.",true);
   }
 }
 $("readLabelBtn").addEventListener("click",runOCR);
@@ -479,6 +507,8 @@ $("barcodeBtn").addEventListener("click",async()=>{
 function stopLiveCamera(){
   try { if(scanControls && typeof scanControls.stop==="function") scanControls.stop(); } catch(e){}
   scanControls=null;
+  if(liveOCRTimer){clearInterval(liveOCRTimer);liveOCRTimer=null;}
+  liveOCRBusy=false;
   if(barcodeReader){try{barcodeReader.reset();}catch(e){} barcodeReader=null;}
   if(liveStream){liveStream.getTracks().forEach(track=>track.stop());liveStream=null;}
   const video=$("liveVideo");
@@ -496,7 +526,30 @@ $("startScanBtn").addEventListener("click",async()=>{
     liveStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false});
     video.srcObject=liveStream; video.style.display="block"; await video.play();
     $("captureBtn").disabled=false; $("stopScanBtn").disabled=false;
-    status("scanStatus","Caméra ouverte. Place l’étiquette dans le cadre. Le code-barres sera recherché en direct.");
+    status("scanStatus","Caméra ouverte. Recherche en direct du numéro, du client THOMON et du code P007…");
+    // OCR léger en direct toutes les 2,5 secondes, sans bloquer la capture ni le lecteur de code-barres.
+    liveOCRTimer=setInterval(async()=>{
+      if(liveOCRBusy || !video.videoWidth || !window.Tesseract) return;
+      liveOCRBusy=true;
+      try{
+        const c=document.createElement("canvas");
+        const vw=video.videoWidth, vh=video.videoHeight;
+        c.width=Math.min(1200,vw); c.height=Math.round(vh*(c.width/vw));
+        c.getContext("2d").drawImage(video,0,0,c.width,c.height);
+        const shot=c.toDataURL("image/jpeg",0.82);
+        const result=await Tesseract.recognize(shot,"eng",{tessedit_pageseg_mode:"11"});
+        const raw=(result.data.text||"").toUpperCase();
+        const compact=raw.replace(/\s+/g,"").replace(/[OQ](?=\d)/g,"0");
+        const m=compact.match(/26CR\d{5,6}/);
+        if(m && !$("orderNo").value.trim()) $("orderNo").value=m[0];
+        if(/TH[O0]M[O0]N/.test(raw.replace(/\s+/g,"")) && !$("clientName").value.trim()) $("clientName").value="THOMON";
+        if(/P\s*0{1,2}7/.test(raw) && m){
+          status("scanStatus","En direct : commande "+m[0]+", client/code à confirmer. Capture la photo quand l’étiquette est bien cadrée.");
+        }else if(m){
+          status("scanStatus","Commande détectée en direct : "+m[0]+". Garde l’étiquette cadrée pour essayer de lire le client.");
+        }
+      }catch(e){} finally {liveOCRBusy=false;}
+    },2500);
     if(window.ZXing && ZXing.BrowserMultiFormatReader){
       barcodeReader=new ZXing.BrowserMultiFormatReader();
       barcodeReader.decodeFromVideoElement(video,(result,err)=>{
