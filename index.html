@@ -391,134 +391,134 @@ async function runOCR() {
     return;
   }
   if (!window.Tesseract) {
-    status("scanStatus", "Le module OCR n’a pas pu se charger. Vérifie ta connexion.", true);
+    status("scanStatus", "Le module OCR n’a pas pu se charger. Vérifie ta connexion internet.", true);
     return;
   }
 
-  status("scanStatus", "Lecture ciblée de la commande, du client et du châssis…");
+  status("scanStatus", "Lecture de l’étiquette entière et repérage des trois champs…");
 
   try {
+    // Lecture de toute l'image : les coordonnées OCR servent à identifier les champs.
+    const result = await Tesseract.recognize(currentPhoto, "eng", {
+      preserve_interword_spaces: "1",
+      tessedit_pageseg_mode: "11"
+    });
+
+    const data = result.data || {};
     const img = new Image();
     img.src = currentPhoto;
     await new Promise((resolve, reject) => {
       img.onload = resolve;
       img.onerror = () => reject(new Error("Image illisible"));
     });
+    const W = img.naturalWidth || 1;
+    const H = img.naturalHeight || 1;
 
-    const W = img.naturalWidth;
-    const H = img.naturalHeight;
+    const words = (data.words || [])
+      .filter(w => w && w.text && w.bbox)
+      .map(w => ({
+        text: String(w.text).trim().toUpperCase(),
+        x: (w.bbox.x0 + w.bbox.x1) / 2,
+        y: (w.bbox.y0 + w.bbox.y1) / 2,
+        x0: w.bbox.x0, x1: w.bbox.x1,
+        y0: w.bbox.y0, y1: w.bbox.y1,
+        confidence: Number(w.confidence || 0)
+      }))
+      .filter(w => w.text)
+      .map(w => ({...w, nx:w.x/W, ny:w.y/H, nh:(w.y1-w.y0)/H}));
 
-    function prepareCrop(x, y, w, h, scale = 4) {
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(w * scale);
-      canvas.height = Math.round(h * scale);
-
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      ctx.fillStyle = "#fff";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(img, x, y, w, h, 0, 0, canvas.width, canvas.height);
-
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const d = imageData.data;
-
-      for (let i = 0; i < d.length; i += 4) {
-        const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-        const value = Math.max(0, Math.min(255, (gray - 128) * 1.7 + 128));
-        d[i] = d[i + 1] = d[i + 2] = value;
-      }
-
-      ctx.putImageData(imageData, 0, 0);
-      return canvas;
-    }
-
-    async function readCrop(canvas, whitelist, psm = "7") {
-      const result = await Tesseract.recognize(
-        canvas.toDataURL("image/png"),
-        "eng",
-        {
-          tessedit_pageseg_mode: psm,
-          preserve_interword_spaces: "1",
-          ...(whitelist ? { tessedit_char_whitelist: whitelist } : {})
-        }
-      );
-      return (result.data.text || "").trim();
-    }
-
-    const orderCrop = prepareCrop(W * 0.05, H * 0.05, W * 0.62, H * 0.38, 4);
-    const clientCrop = prepareCrop(W * 0.04, H * 0.20, W * 0.55, H * 0.42, 4);
-    const chassisCrop = prepareCrop(W * 0.58, H * 0.02, W * 0.40, H * 0.40, 5);
-
-    status("scanStatus", "Lecture du numéro de commande…");
-    const orderText = await readCrop(
-      orderCrop,
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-      "6"
-    );
-
-    status("scanStatus", "Lecture du nom du client…");
-    const clientText = await readCrop(
-      clientCrop,
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸ'- ",
-      "6"
-    );
-
-    status("scanStatus", "Lecture du numéro de châssis…");
-    const chassisText = await readCrop(
-      chassisCrop,
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-      "8"
-    );
-
-    const orderCompact = orderText.toUpperCase().replace(/[^A-Z0-9]/g, "");
-    const orderMatch = orderCompact.match(/[0-9]{2}CR[0-9]{4,8}/);
-
-    const clientLines = clientText
+    const normalize = value => String(value || "")
       .toUpperCase()
-      .split(/\n+/)
-      .map(line => line.replace(/[^A-ZÀ-Ÿ' -]/g, " ").replace(/\s+/g, " ").trim())
-      .filter(Boolean);
+      .replace(/[ＯО]/g, "0")
+      .replace(/[–—]/g, "-")
+      .replace(/[^A-Z0-9]/g, "");
 
-    const ignored = /WAKO|PORTE|ARRIERE|AVANT|CODE|BARRE|CHASSIS|COMMANDE/;
-    const client = clientLines.find(line => {
-      const letters = line.replace(/[^A-ZÀ-Ÿ]/g, "");
-      return letters.length >= 4 &&
-        letters.length <= 24 &&
-        !ignored.test(line);
-    }) || "";
+    // Commande : référence de type 26CR02833, dans la partie haute gauche.
+    const orderCandidates = words
+      .filter(w => w.nx < 0.70 && w.ny < 0.48)
+      .sort((a,b) => (a.ny-b.ny) || (a.nx-b.nx));
 
-    const chassisCompact = chassisText.toUpperCase().replace(/[^A-Z0-9]/g, "");
-    const chassisMatch = chassisCompact.match(/P[0-9]{3}/);
+    let order = "";
+    for (const w of orderCandidates) {
+      const compact = normalize(w.text)
+        .replace(/[OQ](?=\d)/g, "0")
+        .replace(/[IL|](?=\d)/g, "1");
+      const match = compact.match(/\d{2}CR\d{4,8}/);
+      if (match) { order = match[0]; break; }
+    }
 
-    if (orderMatch) $("orderNo").value = orderMatch[0];
+    // Si l'OCR sépare la référence en plusieurs mots, regroupe les mots proches sur la même ligne.
+    if (!order) {
+      for (let i = 0; i < orderCandidates.length && !order; i++) {
+        for (let count = 2; count <= 3 && i + count <= orderCandidates.length; count++) {
+          const group = orderCandidates.slice(i, i + count);
+          if (group.some(w => Math.abs(w.ny - group[0].ny) > 0.045)) continue;
+          const compact = group.map(w => normalize(w.text)).join("")
+            .replace(/[OQ](?=\d)/g, "0")
+            .replace(/[IL|](?=\d)/g, "1");
+          const match = compact.match(/\d{2}CR\d{4,8}/);
+          if (match) { order = match[0]; break; }
+        }
+      }
+    }
+
+    // Client : ligne alphabétique située sous la référence, côté gauche.
+    const orderWord = orderCandidates.find(w => order && normalize(w.text).includes(order));
+    const referenceY = orderWord ? orderWord.ny : 0.18;
+    const clientCandidates = words
+      .filter(w =>
+        w.nx < 0.43 &&
+        w.ny > Math.max(0.08, referenceY - 0.015) &&
+        w.ny < Math.min(0.60, referenceY + 0.24) &&
+        /^[A-ZÀ-Ÿ][A-ZÀ-Ÿ'-]{2,}$/i.test(w.text) &&
+        !/^(WAKO|PORTE|ARRIERE|AVANT|CODE|BARRE|CHASSIS|COMMANDE|BELGIQUE)$/i.test(w.text)
+      )
+      .sort((a,b) => (a.ny-b.ny) || (a.nx-b.nx));
+
+    let client = "";
+    if (clientCandidates.length) {
+      const first = clientCandidates[0];
+      const sameLine = clientCandidates
+        .filter(w => Math.abs(w.ny - first.ny) < Math.max(0.018, first.nh * 1.4))
+        .sort((a,b) => a.nx-b.nx);
+      client = sameLine.map(w => w.text).join(" ").trim();
+      if (client.length > 24) client = first.text;
+    }
+
+    // Châssis : code P suivi de trois chiffres, dans le coin supérieur droit.
+    const chassisCandidates = words
+      .filter(w => w.nx > 0.62 && w.ny < 0.48)
+      .sort((a,b) => (a.ny-b.ny) || (b.confidence-a.confidence));
+
+    let chassis = "";
+    for (const w of chassisCandidates) {
+      const compact = normalize(w.text).replace(/[OQ](?=\d)/g, "0");
+      const match = compact.match(/P[0-9]{3}/);
+      if (match) { chassis = match[0]; break; }
+    }
+
+    if (order) $("orderNo").value = order;
     if (client) $("clientName").value = client;
-    if (chassisMatch) $("frameNo").value = chassisMatch[0];
+    if (chassis) $("frameNo").value = chassis;
 
     const found = [];
-    if (orderMatch) found.push("Commande : " + orderMatch[0]);
+    if (order) found.push("Commande : " + order);
     if (client) found.push("Client : " + client);
-    if (chassisMatch) found.push("Châssis : " + chassisMatch[0]);
+    if (chassis) found.push("Châssis : " + chassis);
 
     if (found.length) {
-      status(
-        "scanStatus",
-        "Lecture terminée : " + found.join(" • ") +
-        ". Vérifie les champs avant d’enregistrer."
-      );
+      status("scanStatus", "Lecture terminée : " + found.join(" • ") + ". Vérifie les champs avant d’enregistrer.");
     } else {
-      status(
-        "scanStatus",
-        "Aucun résultat suffisamment fiable. Garde la photo, cadre l’étiquette entière et bien droite, puis réessaie.",
+      const previewText = String(data.text || "").replace(/\s+/g, " ").trim().slice(0, 180);
+      status("scanStatus",
+        "Texte détecté, mais les champs n’ont pas pu être isolés." +
+        (previewText ? " Lecture brute : « " + previewText + " »." : "") +
+        " La photo originale est conservée ; vérifie les champs manuellement.",
         true
       );
     }
   } catch (err) {
-    status(
-      "scanStatus",
-      "La lecture a échoué. La photo originale est conservée. Réessaie avec une photo nette.",
-      true
-    );
+    status("scanStatus", "La lecture a échoué. La photo originale est conservée. Réessaie avec une photo nette.", true);
   }
 }
 $("readLabelBtn").addEventListener("click",runOCR);
