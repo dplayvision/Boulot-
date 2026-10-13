@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f3f6fb">
 <title>Scan Châssis</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
 <style>
 :root{--bg:#f3f6fb;--card:#fff;--ink:#172033;--muted:#65718a;--line:#dfe6f0;--blue:#2563eb;--blue2:#1d4ed8;--green:#15803d;--red:#b91c1c;--shadow:0 8px 28px rgba(28,45,80,.08)}
 *{box-sizing:border-box}
@@ -57,7 +59,8 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:0 20px 25px}
     <p class="hint">La photo originale est conservée avec la fiche dans IndexedDB. Sur iPhone, autorise l’accès à l’appareil photo si demandé.</p>
     <img id="preview" alt="Aperçu de l’étiquette">
     <div class="actions">
-      <button type="button" class="secondary" id="readLabelBtn">🔎 Lire le texte (si disponible)</button>
+      <button type="button" class="primary" id="readLabelBtn">🔎 Scanner le texte automatiquement</button>
+      <button type="button" class="secondary" id="barcodeBtn">▥ Lire le code-barres</button>
       <button type="button" class="neutral" id="clearPhotoBtn">Retirer la photo</button>
     </div>
     <div class="status" id="scanStatus" aria-live="polite"></div>
@@ -67,6 +70,8 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:0 20px 25px}
     <h2>2. Informations de la commande</h2>
     <label for="orderNo">Numéro de commande *</label>
     <input id="orderNo" type="text" autocomplete="off" placeholder="Ex. : 123456">
+    <label for="designation">Désignation / référence (facultatif)</label>
+    <input id="designation" type="text" autocomplete="off" placeholder="Ex. : BELONCLE_CVR 19421">
     <label for="frameNo">Numéro du châssis *</label>
     <input id="frameNo" type="text" autocomplete="off" placeholder="Scanner ou encoder le numéro">
     <p class="hint">Le numéro du châssis peut être corrigé manuellement après la lecture de l’étiquette.</p>
@@ -189,7 +194,7 @@ function resetForm() {
 }
 function loadForm(record) {
   editingId = record.id; currentPhoto = record.photo || null; currentPhotoType = record.photoType || "image/jpeg";
-  $("orderNo").value = record.orderNo || ""; $("frameNo").value = record.frameNo || ""; $("notes").value = record.notes || "";
+  $("orderNo").value = record.orderNo || ""; $("designation").value = record.designation || ""; $("frameNo").value = record.frameNo || ""; $("notes").value = record.notes || "";
   setOps(record.operations || []);
   $("cameraInput").value = "";
   if (currentPhoto) { $("preview").src = currentPhoto; $("preview").style.display = "block"; }
@@ -207,7 +212,7 @@ function renderRecord(record) {
   const ops = (record.operations||[]).map(op=>`<span class="badge">${escapeHTML(op)}</span>`).join(" ");
   article.innerHTML = `
     <div class="record-top">
-      <div><h3>Commande ${escapeHTML(record.orderNo)}</h3><p>Châssis : <strong>${escapeHTML(record.frameNo)}</strong></p>
+      <div><h3>Commande ${escapeHTML(record.orderNo)}</h3><p>Référence : <strong>${escapeHTML(record.designation||"—")}</strong></p><p>Châssis / code-barres : <strong>${escapeHTML(record.frameNo)}</strong></p>
       <p>${new Date(record.updatedAt||record.createdAt).toLocaleString("fr-BE")}</p></div>
       <span class="badge">${(record.operations||[]).length} opération(s)</span>
     </div>
@@ -234,6 +239,7 @@ async function refreshRecords() {
     const filtered = records.filter(r =>
       String(r.orderNo||"").toLocaleLowerCase("fr").includes(query) ||
       String(r.frameNo||"").toLocaleLowerCase("fr").includes(query) ||
+      String(r.designation||"").toLocaleLowerCase("fr").includes(query) ||
       (r.operations||[]).some(op=>op.toLocaleLowerCase("fr").includes(query))
     );
     container.replaceChildren();
@@ -261,18 +267,39 @@ $("clearPhotoBtn").addEventListener("click",()=>{
   $("preview").removeAttribute("src"); $("preview").style.display="none";
   status("scanStatus","Photo retirée de la fiche en cours.");
 });
-$("readLabelBtn").addEventListener("click",async()=>{
+async function runOCR() {
   if(!currentPhoto){status("scanStatus","Prends d’abord une photo de l’étiquette.",true);return;}
-  if(!("TextDetector" in window)){status("scanStatus","La lecture automatique du texte n’est pas disponible dans ce navigateur. Encode le numéro du châssis manuellement.",true);return;}
+  if(!window.Tesseract){status("scanStatus","Le module OCR n’a pas pu se charger. Vérifie ta connexion internet.",true);return;}
+  status("scanStatus","Lecture automatique en cours… garde l’application ouverte.");
+  try {
+    const result = await Tesseract.recognize(currentPhoto, "eng", { logger: m => { if(m.status === "recognizing text") status("scanStatus",`Lecture du texte… ${Math.round((m.progress||0)*100)} %`); } });
+    const text = (result.data.text || "").replace(/[\r\n]+/g," ").replace(/\s+/g," ").trim();
+    if(!text){status("scanStatus","Aucun texte reconnu. Essaie une photo plus nette et plus droite.",true);return;}
+    // Priorité au numéro de commande WAKO du type 26CR02781.
+    const orderMatch = text.toUpperCase().replace(/O(?=\d)/g,"0").match(/\b26\s*CR\s*0?\d{4,6}\b/);
+    if(orderMatch && !$("orderNo").value.trim()) $("orderNo").value = orderMatch[0].replace(/\s+/g,"").replace("26CR","26CR");
+    // Repère une désignation de type BELONCLE_CVR 19421, en gardant une correction manuelle possible.
+    const normalized = text.toUpperCase().replace(/[–—]/g,"-");
+    const desMatch = normalized.match(/BELONCLE[ _-]*CVR\s*\d{3,6}/);
+    if(desMatch && !$("designation").value.trim()) $("designation").value = desMatch[0].replace(/BELONCLE[ _-]*CVR/,"BELONCLE_CVR ").replace(/\s+/g," ").trim();
+    // Le numéro sous le code-barres est généralement une référence alphanumérique courte.
+    const barcodeText = normalized.match(/\b81[0-9A-Z][0-9A-Z ]{3,12}\b/);
+    if(barcodeText && !$("frameNo").value.trim()) $("frameNo").value = barcodeText[0].replace(/\s+/g,"");
+    status("scanStatus","Texte lu. Vérifie les champs proposés avant d’enregistrer. Texte reconnu : "+text);
+  } catch(err) { status("scanStatus","La lecture automatique a échoué. Essaie une photo plus nette ou encode les valeurs manuellement.",true); }
+}
+$("readLabelBtn").addEventListener("click",runOCR);
+$("barcodeBtn").addEventListener("click",async()=>{
+  if(!currentPhoto){status("scanStatus","Prends d’abord une photo de l’étiquette.",true);return;}
+  if(!window.ZXing || !ZXing.BrowserMultiFormatReader){status("scanStatus","Le lecteur de code-barres n’a pas pu se charger. Vérifie ta connexion internet.",true);return;}
   try {
     const img=new Image(); img.src=currentPhoto; await img.decode();
-    const detector=new TextDetector(); const results=await detector.detect(img);
-    const text=results.map(x=>x.rawValue).join(" ");
-    if(!text){status("scanStatus","Aucun texte reconnu. Encode le numéro du châssis manuellement.",true);return;}
-    const candidate=text.match(/[A-Z0-9][A-Z0-9./_-]{4,}/i);
-    if(candidate && !$("frameNo").value.trim()) $("frameNo").value=candidate[0];
-    status("scanStatus","Texte détecté : "+text+(candidate?" — vérifie le numéro proposé.":""));
-  } catch(err) { status("scanStatus","Lecture automatique indisponible. Vérifie le numéro manuellement.",true); }
+    const reader=new ZXing.BrowserMultiFormatReader();
+    const result=await reader.decodeFromImageElement(img);
+    const value=result.getText();
+    $("frameNo").value=value;
+    status("scanStatus","Code-barres lu : "+value+". Vérifie qu’il correspond bien au numéro de châssis.");
+  } catch(err) { status("scanStatus","Code-barres non détecté sur cette photo. Essaie une image plus nette ou utilise le scan du texte.",true); }
 });
 $("saveBtn").addEventListener("click",async()=>{
   const orderNo=$("orderNo").value.trim(), frameNo=$("frameNo").value.trim();
@@ -280,7 +307,7 @@ $("saveBtn").addEventListener("click",async()=>{
   if(!frameNo){status("formStatus","Le numéro du châssis est obligatoire.",true);$("frameNo").focus();return;}
   const now=Date.now();
   try {
-    const record={orderNo,frameNo,operations:getOps(),notes:$("notes").value.trim(),photo:currentPhoto,photoType:currentPhotoType,updatedAt:now};
+    const record={orderNo,designation:$("designation").value.trim(),frameNo,operations:getOps(),notes:$("notes").value.trim(),photo:currentPhoto,photoType:currentPhotoType,updatedAt:now};
     if(editingId){record.id=editingId;const old=await getRecord(editingId);record.createdAt=old?.createdAt||now;}
     else record.createdAt=now;
     const id=await saveRecord(record); editingId=id;
@@ -316,7 +343,7 @@ $("importInput").addEventListener("change",async e=>{
       const existing=await allRecords();
       const duplicate=existing.find(r=>r.orderNo===item.orderNo && r.frameNo===item.frameNo && JSON.stringify(r.operations||[])===JSON.stringify(item.operations||[]));
       if(duplicate){skipped++;continue;}
-      const record={orderNo:String(item.orderNo),frameNo:String(item.frameNo),operations:OPS.filter(op=>(item.operations||[]).includes(op)),notes:String(item.notes||""),photo:item.photo||null,photoType:item.photoType||"image/jpeg",createdAt:Number(item.createdAt)||Date.now(),updatedAt:Number(item.updatedAt)||Date.now()};
+      const record={orderNo:String(item.orderNo),designation:String(item.designation||""),frameNo:String(item.frameNo),operations:OPS.filter(op=>(item.operations||[]).includes(op)),notes:String(item.notes||""),photo:item.photo||null,photoType:item.photoType||"image/jpeg",createdAt:Number(item.createdAt)||Date.now(),updatedAt:Number(item.updatedAt)||Date.now()};
       await saveRecord(record); added++;
     }
     await refreshRecords();
