@@ -402,78 +402,66 @@ async function prepareOCRImages(dataURL) {
 async function runOCR() {
   if(!currentPhoto){status("scanStatus","Prends d’abord une photo de l’étiquette.",true);return;}
   if(!window.Tesseract){status("scanStatus","Le module OCR n’a pas pu se charger. Vérifie ta connexion internet.",true);return;}
-  status("scanStatus","Préparation de plusieurs zones de l’étiquette…");
+  status("scanStatus","Lecture ciblée de l’étiquette…");
   try {
     const variants = await prepareOCRImages(currentPhoto);
     const results = [];
-    for (let i=0; i<variants.length; i++) {
-      const v = variants[i];
-      status("scanStatus",`Lecture ciblée ${i+1}/${variants.length} : ${v.label}…`);
-      const result = await Tesseract.recognize(v.source, "eng", {
-        logger: m => {
-          if(m.status === "recognizing text") {
-            status("scanStatus",`Lecture ${i+1}/${variants.length}… ${Math.round((m.progress||0)*100)} %`);
-          }
-        },
-        tessedit_pageseg_mode: (i >= 4 ? "7" : "6")
-      });
-      results.push({label:v.label, text:result.data.text||"", confidence:Number(result.data.confidence||0)});
-    }
-
-    const combined = results.map(r=>r.text).join("\n");
-    const compact = combined.toUpperCase()
-      .replace(/[–—]/g,"-")
-      .replace(/[OQ](?=\d)/g,"0")
-      .replace(/I(?=\d)/g,"1")
-      .replace(/\s+/g," ");
-
-    // Detect command number across OCR passes, tolerating spaces and common OCR substitutions.
-    const orderPatterns = [
-      /\b26\s*CR\s*0?\s*\d{4,6}\b/,
-      /\b26CR[OQ0-9I]{5,7}\b/
+    // Le numéro de commande est imprimé en gros caractères : le traiter comme une ligne,
+    // avec une whitelist alphanumérique, est plus adapté que la lecture de toute la page.
+    const modes = [
+      {name:"texte normal", psm:"6", whitelist:null},
+      {name:"ligne de commande", psm:"7", whitelist:"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"},
+      {name:"mot unique", psm:"8", whitelist:"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"},
+      {name:"bloc brut", psm:"11", whitelist:null}
     ];
-    let order = "";
-    for (const pattern of orderPatterns) {
-      const m = compact.match(pattern);
-      if (m) {
-        order = m[0].replace(/\s+/g,"").replace(/^26CR/,"26CR").replace(/[OQ]/g,"0").replace(/I/g,"1");
-        if (/^26CR\d{5,6}$/.test(order)) break;
+    const selected = [
+      variants.find(v=>v.label==="zone numéro commande"),
+      variants.find(v=>v.label==="image agrandie"),
+      variants.find(v=>v.label==="zone centrale"),
+      variants.find(v=>v.label==="zone texte client")
+    ].filter(Boolean);
+
+    for(let i=0;i<selected.length;i++){
+      const v=selected[i];
+      for(let j=0;j<modes.length;j++){
+        const mode=modes[j];
+        status("scanStatus",`Lecture ciblée ${i+1}/${selected.length} • méthode ${j+1}/${modes.length}…`);
+        const options={tessedit_pageseg_mode:mode.psm};
+        if(mode.whitelist) options.tessedit_char_whitelist=mode.whitelist;
+        const result=await Tesseract.recognize(v.source,"eng",options);
+        results.push({label:v.label,mode:mode.name,text:result.data.text||"",confidence:Number(result.data.confidence||0)});
       }
     }
-    if (order && !$("orderNo").value.trim()) $("orderNo").value = order;
 
-    // Client code/name: use a short, clearly printed word on the client line, never random full OCR output.
-    if (!$("clientName").value.trim()) {
-      const clientCandidates = [];
-      for (const r of results) {
-        const lines = r.text.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
-        for (const line of lines) {
-          const cleaned = line.toUpperCase()
-            .replace(/[^A-ZÀ-Ÿ0-9_-]/g,"")
-            .replace(/^[^A-ZÀ-Ÿ]+|[^A-ZÀ-Ÿ]+$/g,"");
-          if (/^[A-ZÀ-Ÿ]{4,15}$/.test(cleaned) &&
-              !/^(WAKO|SCHUCO|PORTE|ARRIERE|ARRIERE|THOMON|BELONCLE)$/.test(cleaned)) {
-            clientCandidates.push(cleaned);
-          }
-        }
-      }
-      // THOMON is visibly printed as the client code on the example label; only fill if OCR sees it.
-      const thomon = clientCandidates.find(v=>v==="THOMON");
-      if (thomon) $("clientName").value = thomon;
+    // Examine each OCR result separately so line breaks from another pass cannot hide the code.
+    let order="";
+    for(const r of results){
+      const cleaned=(r.text||"").toUpperCase()
+        .replace(/[–—]/g,"-")
+        .replace(/[\s:._-]+/g,"")
+        .replace(/[OQ]/g,"0")
+        .replace(/[IL]/g,"1");
+      const match=cleaned.match(/26CR[0-9]{5,6}/);
+      if(match){order=match[0];break;}
+    }
+    if(order && !$("orderNo").value.trim()) $("orderNo").value=order;
+
+    // Client name is only filled for the known visible code if an OCR pass confirms it.
+    if(!$("clientName").value.trim()){
+      const hasThomon=results.some(r=>/THOMON/i.test((r.text||"").replace(/[^A-Z]/gi,"")));
+      if(hasThomon) $("clientName").value="THOMON";
     }
 
-    // Keep the raw photo untouched; report targeted matches and ask for verification.
-    const best = results.slice().sort((a,b)=>b.confidence-a.confidence)[0];
-    const detected = [];
-    if(order) detected.push("commande "+order);
-    if($("clientName").value.trim()) detected.push("client "+$("clientName").value.trim());
-    if(!detected.length) {
-      status("scanStatus","Lecture terminée, mais aucun champ fiable n’a été reconnu. La photo est conservée : rapproche-toi de l’étiquette ou utilise le lecteur de code-barres.",true);
-    } else {
-      status("scanStatus",`Lecture ciblée terminée (${best.label}, confiance OCR globale ${Math.round(best.confidence)} %). Détecté : ${detected.join(" • ")}. Vérifie les champs avant d’enregistrer.`);
+    // If the OCR still misses the command, don't silently pretend it worked.
+    if(order){
+      status("scanStatus",`Commande détectée : ${order}. Vérifie le numéro et complète le châssis si nécessaire.`);
+    }else{
+      const best=results.slice().sort((a,b)=>b.confidence-a.confidence)[0];
+      const sample=best?(best.text||"").replace(/\s+/g," ").trim().slice(0,120):"";
+      status("scanStatus",`La photo est conservée, mais le numéro de commande n’a pas été reconnu. Résultat OCR de contrôle : « ${sample||"aucun texte"} ». Essaie de cadrer uniquement l’étiquette, bien nette et sans reflet.`,true);
     }
   } catch(err) {
-    status("scanStatus","La lecture automatique a échoué. La photo originale est conservée ; essaie une photo plus rapprochée.",true);
+    status("scanStatus","La lecture automatique a échoué. La photo originale est conservée. Vérifie la connexion et réessaie.",true);
   }
 }
 $("readLabelBtn").addEventListener("click",runOCR);
