@@ -78,8 +78,6 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:0 20px 25px}
     <input id="clientName" type="text" autocomplete="off" placeholder="Reconnu automatiquement si possible">
     <label for="orderNo">Numéro de commande *</label>
     <input id="orderNo" type="text" autocomplete="off" placeholder="Ex. : 26CR02781">
-    <label for="designation">Désignation / référence (facultatif)</label>
-    <input id="designation" type="text" autocomplete="off" placeholder="Ex. : BELONCLE_CVR 19421">
     <label for="frameNo">Numéro du châssis *</label>
     <input id="frameNo" type="text" autocomplete="off" placeholder="Scanner ou encoder le numéro">
     <p class="hint">Le numéro du châssis peut être corrigé manuellement après la lecture de l’étiquette.</p>
@@ -197,7 +195,7 @@ function setOps(values) {
 }
 function resetForm() {
   editingId = null; currentPhoto = null; currentPhotoType = "image/jpeg";
-  $("clientName").value = ""; $("orderNo").value = ""; $("frameNo").value = ""; $("notes").value = ""; $("designation").value = "";
+  $("clientName").value = ""; $("orderNo").value = ""; $("frameNo").value = ""; $("notes").value = "";
   setOps([]); $("cameraInput").value = ""; $("preview").removeAttribute("src"); $("preview").style.display = "none";
   $("saveBtn").textContent = "💾 Enregistrer la fiche";
   status("formStatus","");
@@ -205,7 +203,7 @@ function resetForm() {
 }
 function loadForm(record) {
   editingId = record.id; currentPhoto = record.photo || null; currentPhotoType = record.photoType || "image/jpeg";
-  $("clientName").value = record.clientName || ""; $("orderNo").value = record.orderNo || ""; $("designation").value = record.designation || ""; $("frameNo").value = record.frameNo || ""; $("notes").value = record.notes || "";
+  $("clientName").value = record.clientName || ""; $("orderNo").value = record.orderNo || ""; $("frameNo").value = record.frameNo || ""; $("notes").value = record.notes || "";
   setOps(record.operations || []);
   $("cameraInput").value = "";
   if (currentPhoto) { $("preview").src = currentPhoto; $("preview").style.display = "block"; }
@@ -223,7 +221,7 @@ function renderRecord(record) {
   const ops = (record.operations||[]).map(op=>`<span class="badge">${escapeHTML(op)}</span>`).join(" ");
   article.innerHTML = `
     <div class="record-top">
-      <div><h3>Commande ${escapeHTML(record.orderNo)}</h3><p>Client : <strong>${escapeHTML(record.clientName||"—")}</strong></p><p>Référence : <strong>${escapeHTML(record.designation||"—")}</strong></p><p>Châssis / code-barres : <strong>${escapeHTML(record.frameNo)}</strong></p>
+      <div><h3>Commande ${escapeHTML(record.orderNo)}</h3><p>Client : <strong>${escapeHTML(record.clientName||"—")}</strong></p><p>Châssis / code-barres : <strong>${escapeHTML(record.frameNo)}</strong></p>
       <p>${new Date(record.updatedAt||record.createdAt).toLocaleString("fr-BE")}</p></div>
       <span class="badge">${(record.operations||[]).length} opération(s)</span>
     </div>
@@ -251,7 +249,6 @@ async function refreshRecords() {
       String(r.clientName||"").toLocaleLowerCase("fr").includes(query) ||
       String(r.orderNo||"").toLocaleLowerCase("fr").includes(query) ||
       String(r.frameNo||"").toLocaleLowerCase("fr").includes(query) ||
-      String(r.designation||"").toLocaleLowerCase("fr").includes(query) ||
       (r.operations||[]).some(op=>op.toLocaleLowerCase("fr").includes(query))
     );
     container.replaceChildren();
@@ -345,58 +342,138 @@ async function makeOCRVariants(dataURL) {
   return variants;
 }
 
+async function prepareOCRImages(dataURL) {
+  const img = new Image();
+  img.src = dataURL;
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = () => reject(new Error("Image impossible à préparer."));
+  });
+
+  const W = img.naturalWidth, H = img.naturalHeight;
+  const variants = [];
+
+  function addCanvas(label, sx, sy, sw, sh, rotate=0, enhance=true) {
+    const cropW = Math.max(1, Math.round(sw));
+    const cropH = Math.max(1, Math.round(sh));
+    const rotated = rotate === 90 || rotate === 270;
+    const scale = Math.min(3, Math.max(2, 1800 / Math.max(cropW, cropH)));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round((rotated ? cropH : cropW) * scale);
+    canvas.height = Math.round((rotated ? cropW : cropH) * scale);
+    const ctx = canvas.getContext("2d", {willReadFrequently:true});
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.translate(canvas.width/2, canvas.height/2);
+    ctx.rotate(rotate * Math.PI / 180);
+    ctx.drawImage(img, sx, sy, sw, sh, -cropW*scale/2, -cropH*scale/2, cropW*scale, cropH*scale);
+    ctx.restore();
+
+    if (enhance) {
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const d = imageData.data;
+      for (let i=0; i<d.length; i+=4) {
+        const gray = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+        // High contrast, retaining dark print while whitening the label background.
+        const value = gray < 145 ? Math.max(0, gray*0.72) : Math.min(255, 180 + (gray-145)*1.35);
+        d[i] = d[i+1] = d[i+2] = value;
+      }
+      ctx.putImageData(imageData,0,0);
+    }
+    variants.push({label, source:canvas.toDataURL("image/png")});
+  }
+
+  // Whole image, plus central crops: this also works when the user photographs the frame around the label.
+  addCanvas("image agrandie", 0, 0, W, H, 0, true);
+  addCanvas("zone centrale", W*0.03, H*0.08, W*0.94, H*0.84, 0, true);
+  addCanvas("rotation 90°", 0, 0, W, H, 90, true);
+  addCanvas("rotation 270°", 0, 0, W, H, 270, true);
+
+  // Targeted regions for the common WAKO label layout.
+  // Run each crop in both normal and contrast-enhanced form.
+  addCanvas("zone numéro commande", W*0.08, H*0.10, W*0.62, H*0.42, 0, true);
+  addCanvas("zone texte client", W*0.05, H*0.25, W*0.50, H*0.42, 0, true);
+  addCanvas("zone texte sous code-barres", W*0.10, H*0.55, W*0.55, H*0.35, 0, true);
+
+  return variants;
+}
+
 async function runOCR() {
   if(!currentPhoto){status("scanStatus","Prends d’abord une photo de l’étiquette.",true);return;}
   if(!window.Tesseract){status("scanStatus","Le module OCR n’a pas pu se charger. Vérifie ta connexion internet.",true);return;}
-  status("scanStatus","Préparation de l’étiquette pour une lecture plus précise…");
+  status("scanStatus","Préparation de plusieurs zones de l’étiquette…");
   try {
-    const variants = await makeOCRVariants(currentPhoto);
-    let best = null;
-    const modes = ["6","11"];
-    for (let i=0;i<variants.length;i++) {
-      for (const psm of modes) {
-        status("scanStatus",`Lecture optimisée ${i+1}/${variants.length} · mode ${psm}…`);
-        const result = await Tesseract.recognize(variants[i].source,"eng",{
-          logger:m=>{
-            if(m.status==="recognizing text") status("scanStatus",`Analyse de l’étiquette… ${Math.round((m.progress||0)*100)} %`);
-          },
-          tessedit_pageseg_mode: psm,
-          preserve_interword_spaces: "1"
-        });
-        const candidate={text:result.data.text||"",confidence:Number(result.data.confidence||0),label:variants[i].label,psm};
-        // Favoriser les résultats contenant un numéro de commande valide plutôt que la confiance seule.
-        const score = c => {
-          const t=c.text.toUpperCase().replace(/\s+/g,"");
-          return c.confidence + (/\b26CR0?\d{4,6}\b/.test(t)?80:0) + (/\bTHOMON\b/.test(t)?15:0) + (/\bPORTE[_ -]?ARRIERE\b/.test(t)?15:0) + (/\b81[0-9A-Z]{6,10}\b/.test(t)?10:0);
-        };
-        if(!best || score(candidate)>score(best)) best=candidate;
+    const variants = await prepareOCRImages(currentPhoto);
+    const results = [];
+    for (let i=0; i<variants.length; i++) {
+      const v = variants[i];
+      status("scanStatus",`Lecture ciblée ${i+1}/${variants.length} : ${v.label}…`);
+      const result = await Tesseract.recognize(v.source, "eng", {
+        logger: m => {
+          if(m.status === "recognizing text") {
+            status("scanStatus",`Lecture ${i+1}/${variants.length}… ${Math.round((m.progress||0)*100)} %`);
+          }
+        },
+        tessedit_pageseg_mode: (i >= 4 ? "7" : "6")
+      });
+      results.push({label:v.label, text:result.data.text||"", confidence:Number(result.data.confidence||0)});
+    }
+
+    const combined = results.map(r=>r.text).join("\n");
+    const compact = combined.toUpperCase()
+      .replace(/[–—]/g,"-")
+      .replace(/[OQ](?=\d)/g,"0")
+      .replace(/I(?=\d)/g,"1")
+      .replace(/\s+/g," ");
+
+    // Detect command number across OCR passes, tolerating spaces and common OCR substitutions.
+    const orderPatterns = [
+      /\b26\s*CR\s*0?\s*\d{4,6}\b/,
+      /\b26CR[OQ0-9I]{5,7}\b/
+    ];
+    let order = "";
+    for (const pattern of orderPatterns) {
+      const m = compact.match(pattern);
+      if (m) {
+        order = m[0].replace(/\s+/g,"").replace(/^26CR/,"26CR").replace(/[OQ]/g,"0").replace(/I/g,"1");
+        if (/^26CR\d{5,6}$/.test(order)) break;
       }
     }
-    const rawText=best?best.text:"";
-    const lines=rawText.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
-    const text=rawText.replace(/[\r\n]+/g," ").replace(/\s+/g," ").trim();
-    if(!text){status("scanStatus","Aucun texte reconnu. Rapproche-toi de l’étiquette et évite les reflets.",true);return;}
+    if (order && !$("orderNo").value.trim()) $("orderNo").value = order;
 
-    // Tolère les confusions O/0 et les espaces insérés par l'OCR.
-    const normalizedText=text.toUpperCase()
-      .replace(/[–—]/g,"-")
-      .replace(/\b(26)\s*CR\s*([O0])?\s*(\d{4,6})\b/g,(_,a,b,c)=>a+"CR"+(b||"0")+c)
-      .replace(/\b26\s*CR\s*O(?=\d)/g,"26CR0");
-    const orderMatch=normalizedText.match(/\b26\s*CR\s*0?\d{4,6}\b/);
-    if(orderMatch && !$("orderNo").value.trim()) $("orderNo").value=orderMatch[0].replace(/\s+/g,"");
+    // Client code/name: use a short, clearly printed word on the client line, never random full OCR output.
+    if (!$("clientName").value.trim()) {
+      const clientCandidates = [];
+      for (const r of results) {
+        const lines = r.text.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+        for (const line of lines) {
+          const cleaned = line.toUpperCase()
+            .replace(/[^A-ZÀ-Ÿ0-9_-]/g,"")
+            .replace(/^[^A-ZÀ-Ÿ]+|[^A-ZÀ-Ÿ]+$/g,"");
+          if (/^[A-ZÀ-Ÿ]{4,15}$/.test(cleaned) &&
+              !/^(WAKO|SCHUCO|PORTE|ARRIERE|ARRIERE|THOMON|BELONCLE)$/.test(cleaned)) {
+            clientCandidates.push(cleaned);
+          }
+        }
+      }
+      // THOMON is visibly printed as the client code on the example label; only fill if OCR sees it.
+      const thomon = clientCandidates.find(v=>v==="THOMON");
+      if (thomon) $("clientName").value = thomon;
+    }
 
-    const desMatch=normalizedText.match(/\bPORTE[_ -]?ARRIERE\b/i);
-    if(desMatch && !$("designation").value.trim()) $("designation").value="Porte_arriere";
-    const clientMatch=normalizedText.match(/\bTHOMON\b/i);
-    if(clientMatch && !$("clientName").value.trim()) $("clientName").value="THOMON";
-    const shortRef=normalizedText.match(/\b19433\b/);
-    if(shortRef && !$("designation").value.trim()) $("designation").value="19433";
-    const barcodeMatch=normalizedText.match(/\b81[0-9A-Z]{7,10}\b/);
-    if(barcodeMatch && !$("frameNo").value.trim()) $("frameNo").value=barcodeMatch[0];
-
-    status("scanStatus",`Lecture terminée (${best.label}, mode ${best.psm}, confiance ${Math.round(best.confidence)} %). Vérifie les champs proposés. Texte détecté : ${text}`);
+    // Keep the raw photo untouched; report targeted matches and ask for verification.
+    const best = results.slice().sort((a,b)=>b.confidence-a.confidence)[0];
+    const detected = [];
+    if(order) detected.push("commande "+order);
+    if($("clientName").value.trim()) detected.push("client "+$("clientName").value.trim());
+    if(!detected.length) {
+      status("scanStatus","Lecture terminée, mais aucun champ fiable n’a été reconnu. La photo est conservée : rapproche-toi de l’étiquette ou utilise le lecteur de code-barres.",true);
+    } else {
+      status("scanStatus",`Lecture ciblée terminée (${best.label}, confiance OCR globale ${Math.round(best.confidence)} %). Détecté : ${detected.join(" • ")}. Vérifie les champs avant d’enregistrer.`);
+    }
   } catch(err) {
-    status("scanStatus","La lecture automatique a échoué. La photo est conservée : essaie une photo plus nette ou encode les valeurs manuellement.",true);
+    status("scanStatus","La lecture automatique a échoué. La photo originale est conservée ; essaie une photo plus rapprochée.",true);
   }
 }
 $("readLabelBtn").addEventListener("click",runOCR);
@@ -468,7 +545,7 @@ $("saveBtn").addEventListener("click",async()=>{
   if(!frameNo){status("formStatus","Le numéro du châssis est obligatoire.",true);$("frameNo").focus();return;}
   const now=Date.now();
   try {
-    const record={clientName:$("clientName").value.trim(),orderNo,designation:$("designation").value.trim(),frameNo,operations:getOps(),notes:$("notes").value.trim(),photo:currentPhoto,photoType:currentPhotoType,updatedAt:now};
+    const record={clientName:$("clientName").value.trim(),orderNo,frameNo,operations:getOps(),notes:$("notes").value.trim(),photo:currentPhoto,photoType:currentPhotoType,updatedAt:now};
     if(editingId){record.id=editingId;const old=await getRecord(editingId);record.createdAt=old?.createdAt||now;}
     else record.createdAt=now;
     const id=await saveRecord(record); editingId=id;
@@ -504,7 +581,7 @@ $("importInput").addEventListener("change",async e=>{
       const existing=await allRecords();
       const duplicate=existing.find(r=>r.orderNo===item.orderNo && r.frameNo===item.frameNo && JSON.stringify(r.operations||[])===JSON.stringify(item.operations||[]));
       if(duplicate){skipped++;continue;}
-      const record={clientName:String(item.clientName||""),orderNo:String(item.orderNo),designation:String(item.designation||""),frameNo:String(item.frameNo),operations:OPS.filter(op=>(item.operations||[]).includes(op)),notes:String(item.notes||""),photo:item.photo||null,photoType:item.photoType||"image/jpeg",createdAt:Number(item.createdAt)||Date.now(),updatedAt:Number(item.updatedAt)||Date.now()};
+      const record={clientName:String(item.clientName||""),orderNo:String(item.orderNo),frameNo:String(item.frameNo),operations:OPS.filter(op=>(item.operations||[]).includes(op)),notes:String(item.notes||""),photo:item.photo||null,photoType:item.photoType||"image/jpeg",createdAt:Number(item.createdAt)||Date.now(),updatedAt:Number(item.updatedAt)||Date.now()};
       await saveRecord(record); added++;
     }
     await refreshRecords();
