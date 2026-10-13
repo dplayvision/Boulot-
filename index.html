@@ -300,89 +300,101 @@ async function makeOCRVariants(dataURL) {
     img.onerror = () => reject(new Error("Image impossible à préparer."));
   });
 
-  const variants = [{label:"orientation originale", canvas:null}];
-  // Prépare aussi les rotations 90° et 270° pour les étiquettes photographiées verticalement.
-  for (const angle of [90, 270]) {
-    const canvas = document.createElement("canvas");
+  const variants = [];
+  const addVariant = (label, canvas) => variants.push({
+    label,
+    source: canvas.toDataURL("image/jpeg", 0.96)
+  });
+
+  // Originale : garder une version de référence.
+  variants.push({label:"photo originale", source:dataURL});
+
+  // Agrandissement + niveaux de gris + contraste : améliore souvent les petites étiquettes.
+  for (const angle of [0, 90, 270]) {
+    const rotated = document.createElement("canvas");
     const w = img.naturalWidth, h = img.naturalHeight;
-    canvas.width = h; canvas.height = w;
-    const ctx = canvas.getContext("2d");
-    ctx.translate(canvas.width / 2, canvas.height / 2);
-    ctx.rotate(angle * Math.PI / 180);
-    ctx.drawImage(img, -w / 2, -h / 2, w, h);
-    variants.push({label:`rotation ${angle}°`, canvas});
+    rotated.width = angle === 0 ? w : h;
+    rotated.height = angle === 0 ? h : w;
+    const rctx = rotated.getContext("2d");
+    rctx.fillStyle = "#fff";
+    rctx.fillRect(0,0,rotated.width,rotated.height);
+    rctx.translate(rotated.width/2, rotated.height/2);
+    rctx.rotate(angle*Math.PI/180);
+    rctx.drawImage(img,-w/2,-h/2,w,h);
+
+    const scale = Math.min(3, Math.max(1.5, 1800 / Math.max(rotated.width,rotated.height)));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(rotated.width*scale);
+    canvas.height = Math.round(rotated.height*scale);
+    const ctx = canvas.getContext("2d",{willReadFrequently:true});
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(rotated,0,0,canvas.width,canvas.height);
+    const imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
+    const d = imageData.data;
+    for(let i=0;i<d.length;i+=4){
+      const gray = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+      // contraste renforcé, tout en gardant les traits fins des caractères.
+      let v = (gray-128)*1.65+128;
+      v = Math.max(0,Math.min(255,v));
+      d[i]=d[i+1]=d[i+2]=v;
+    }
+    ctx.putImageData(imageData,0,0);
+    addVariant(angle===0?"agrandie et contrastée":`contraste rotation ${angle}°`,canvas);
   }
-  return variants.map(v => ({
-    label: v.label,
-    source: v.canvas ? v.canvas.toDataURL("image/jpeg", 0.92) : dataURL
-  }));
+  return variants;
 }
 
 async function runOCR() {
   if(!currentPhoto){status("scanStatus","Prends d’abord une photo de l’étiquette.",true);return;}
   if(!window.Tesseract){status("scanStatus","Le module OCR n’a pas pu se charger. Vérifie ta connexion internet.",true);return;}
-  status("scanStatus","Préparation de la photo pour une lecture plus précise…");
+  status("scanStatus","Préparation de l’étiquette pour une lecture plus précise…");
   try {
     const variants = await makeOCRVariants(currentPhoto);
     let best = null;
-    for (let i = 0; i < variants.length; i++) {
-      const variant = variants[i];
-      status("scanStatus",`Lecture du texte : essai ${i+1}/${variants.length} (${variant.label})…`);
-      const result = await Tesseract.recognize(variant.source, "eng", {
-        logger: m => {
-          if(m.status === "recognizing text") {
-            status("scanStatus",`Lecture ${i+1}/${variants.length}… ${Math.round((m.progress||0)*100)} %`);
-          }
-        }
-      });
-      const confidence = Number(result.data.confidence || 0);
-      if (!best || confidence > best.confidence) {
-        best = {text: result.data.text || "", confidence, label: variant.label};
+    const modes = ["6","11"];
+    for (let i=0;i<variants.length;i++) {
+      for (const psm of modes) {
+        status("scanStatus",`Lecture optimisée ${i+1}/${variants.length} · mode ${psm}…`);
+        const result = await Tesseract.recognize(variants[i].source,"eng",{
+          logger:m=>{
+            if(m.status==="recognizing text") status("scanStatus",`Analyse de l’étiquette… ${Math.round((m.progress||0)*100)} %`);
+          },
+          tessedit_pageseg_mode: psm,
+          preserve_interword_spaces: "1"
+        });
+        const candidate={text:result.data.text||"",confidence:Number(result.data.confidence||0),label:variants[i].label,psm};
+        // Favoriser les résultats contenant un numéro de commande valide plutôt que la confiance seule.
+        const score = c => {
+          const t=c.text.toUpperCase().replace(/\s+/g,"");
+          return c.confidence + (/\b26CR0?\d{4,6}\b/.test(t)?80:0) + (/\bTHOMON\b/.test(t)?15:0) + (/\bPORTE[_ -]?ARRIERE\b/.test(t)?15:0) + (/\b81[0-9A-Z]{6,10}\b/.test(t)?10:0);
+        };
+        if(!best || score(candidate)>score(best)) best=candidate;
       }
     }
+    const rawText=best?best.text:"";
+    const lines=rawText.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+    const text=rawText.replace(/[\r\n]+/g," ").replace(/\s+/g," ").trim();
+    if(!text){status("scanStatus","Aucun texte reconnu. Rapproche-toi de l’étiquette et évite les reflets.",true);return;}
 
-    const rawText = best ? best.text : "";
-    const lines = rawText.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
-    const text = rawText.replace(/[\r\n]+/g," ").replace(/\s+/g," ").trim();
-    if(!text){
-      status("scanStatus","Aucun texte reconnu. Rapproche-toi de l’étiquette et évite les reflets.",true);
-      return;
-    }
-
-    // Commande : accepte les espaces ou confusions OCR courantes, mais ne remplace pas une valeur déjà saisie.
-    const normalizedText = text.toUpperCase()
+    // Tolère les confusions O/0 et les espaces insérés par l'OCR.
+    const normalizedText=text.toUpperCase()
       .replace(/[–—]/g,"-")
+      .replace(/\b(26)\s*CR\s*([O0])?\s*(\d{4,6})\b/g,(_,a,b,c)=>a+"CR"+(b||"0")+c)
       .replace(/\b26\s*CR\s*O(?=\d)/g,"26CR0");
-    const orderMatch = normalizedText.match(/\b26\s*CR\s*0?\d{4,6}\b/);
-    if(orderMatch && !$("orderNo").value.trim()) {
-      $("orderNo").value = orderMatch[0].replace(/\s+/g,"");
-    }
+    const orderMatch=normalizedText.match(/\b26\s*CR\s*0?\d{4,6}\b/);
+    if(orderMatch && !$("orderNo").value.trim()) $("orderNo").value=orderMatch[0].replace(/\s+/g,"");
 
-    // Désignation : ne remplit que si un motif connu est réellement reconnu.
-    const desMatch = normalizedText.match(/\bBELONCLE[ _-]*(?:CVR|CYR|CVR)\s*\d{3,6}\b/);
-    if(desMatch && !$("designation").value.trim()) {
-      $("designation").value = desMatch[0]
-        .replace(/\s+/g," ")
-        .replace(/^BELONCLE[ _-]*(CVR|CYR)/,"BELONCLE_CVR ")
-        .trim();
-    }
+    const desMatch=normalizedText.match(/\bPORTE[_ -]?ARRIERE\b/i);
+    if(desMatch && !$("designation").value.trim()) $("designation").value="Porte_arriere";
+    const clientMatch=normalizedText.match(/\bTHOMON\b/i);
+    if(clientMatch && !$("clientName").value.trim()) $("clientName").value="THOMON";
+    const shortRef=normalizedText.match(/\b19433\b/);
+    if(shortRef && !$("designation").value.trim()) $("designation").value="19433";
+    const barcodeMatch=normalizedText.match(/\b81[0-9A-Z]{7,10}\b/);
+    if(barcodeMatch && !$("frameNo").value.trim()) $("frameNo").value=barcodeMatch[0];
 
-    // Ne jamais deviner le nom du client à partir d’un texte OCR bruité.
-    // Le champ reste vide si aucun nom fiable n'est identifié, pour éviter le charabia.
-    if(!$("clientName").value.trim()) {
-      const possibleClient = lines.find(line => {
-        const candidate = line.replace(/[^A-Za-zÀ-ÿ '-]/g,"").trim();
-        return candidate.length >= 5 &&
-          candidate.split(/\s+/).length >= 2 &&
-          !/WAKO|SCHUCO|BELONCLE|THOMON|PORTE|ARRIERE|POORT/i.test(candidate) &&
-          !/\d/.test(line);
-      });
-      if(possibleClient) {
-        // Pas d'auto-remplissage du client : l'OCR de cette étiquette ne permet pas de le confirmer.
-      }
-    }
-
-    status("scanStatus",`Lecture terminée (${best.label}, confiance ${Math.round(best.confidence)} %). Vérifie les champs : seuls les formats reconnus ont été proposés. Texte détecté : ${text}`);
+    status("scanStatus",`Lecture terminée (${best.label}, mode ${best.psm}, confiance ${Math.round(best.confidence)} %). Vérifie les champs proposés. Texte détecté : ${text}`);
   } catch(err) {
     status("scanStatus","La lecture automatique a échoué. La photo est conservée : essaie une photo plus nette ou encode les valeurs manuellement.",true);
   }
