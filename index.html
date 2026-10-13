@@ -433,7 +433,7 @@ async function runOCR() {
     crop("photo entière",0,0,W,H,Math.min(3,1800/Math.max(W,H)));
     crop("ligne commande",W*.08,H*.08,W*.58,H*.32,4);
     crop("ligne client",W*.06,H*.20,W*.43,H*.34,4);
-    crop("coin droit P007",W*.60,H*.05,W*.36,H*.35,4);
+    crop("zone châssis en haut à droite",W*.58,H*.03,W*.40,H*.40,5);
     crop("zone basse code",W*.08,H*.48,W*.48,H*.30,4);
 
     const results=[];
@@ -456,44 +456,74 @@ async function runOCR() {
     const normalize = s => String(s||"").toUpperCase()
       .replace(/[–—]/g,"-")
       .replace(/[\s:.,;()[\]{}]/g,"")
-      .replace(/[OQ]/g,"0")
-      .replace(/[IL|]/g,"1")
+      .replace(/[OQ](?=\d)/g,"0")
+      .replace(/[IL|](?=\d)/g,"1")
       .replace(/S(?=\d)/g,"5");
+
+    // Commande : le numéro en gras en haut à gauche. Accepte les références alphanumériques
+    // de type 26CR02833 sans coder un numéro précis.
+    const orderResults=results.filter(r=>r.label==="ligne commande" || r.label==="photo entière");
     let order="";
-    for(const r of results){
+    for(const r of [...orderResults,...results]){
       const t=normalize(r.text);
-      const m=t.match(/26CR[0-9]{5,6}/);
+      const m=t.match(/\d{2}[A-Z]{2}\d{4,8}/);
       if(m){order=m[0];break;}
     }
-    if(order && !$("orderNo").value.trim()) $("orderNo").value=order;
+    if(order) $("orderNo").value=order;
 
-    const allText=results.map(r=>r.text).join("\n").toUpperCase();
-    // Only fill the expected client/code when it is actually present in one of the OCR outputs.
-    if(!$("clientName").value.trim()){
-      if(results.some(r=>normalize(r.text).includes("THOMON"))) $("clientName").value="THOMON";
-      else {
-        const maybe=results.some(r=>/\bTH[O0]M[O0]N\b/.test(r.text.toUpperCase()));
-        if(maybe) $("clientName").value="THOMON";
+    // Client : texte lisible sous la commande, dans la zone gauche.
+    // On cherche une ligne alphabétique, sans chiffres dominants ni mots génériques de l'étiquette.
+    const clientResults=results.filter(r=>r.label==="ligne client");
+    const ignored=/^(WAKO|PORTEARRIERE|PORTEAVANT|P007|G|TH|CODEBARRE|BELGIQUE)$/i;
+    function clientCandidate(text){
+      const lines=String(text||"").split(/\n+/).map(s=>s.trim().replace(/^[^A-ZÀ-Ÿ]+/i,"").replace(/[^A-ZÀ-Ÿ' -]/gi,"").trim()).filter(Boolean);
+      for(const line of lines){
+        const words=line.split(/\s+/).filter(Boolean);
+        const letters=line.replace(/[^A-ZÀ-Ÿ]/gi,"");
+        if(letters.length>=4 && letters.length<=24 && !/\d/.test(line) &&
+           !ignored.test(line.replace(/\s/g,"")) &&
+           !/PORTE|WAKO|ARRIERE|AVANT/i.test(line)){
+          return line.replace(/\s+/g," ").toUpperCase();
+        }
       }
+      return "";
     }
+    let client="";
+    for(const r of clientResults){
+      client=clientCandidate(r.text);
+      if(client) break;
+    }
+    if(client) $("clientName").value=client;
 
-    if(!$("frameNo").value.trim()){
-      const has19433=results.some(r=>{
-        const t=(r.text||"").toUpperCase().replace(/[OQ]/g,"0").replace(/[IL|]/g,"1");
-        return /1\s*9\s*4\s*3\s*3/.test(t) || /19433/.test(t.replace(/\D/g,""));
-      });
-      if(has19433) $("frameNo").value="19433";
+    // Châssis : code alphanumérique dans le coin supérieur droit.
+    // Prend le code court du coin, sans confondre les nombres isolés de la zone centrale.
+    const chassisResults=results.filter(r=>r.label==="zone châssis en haut à droite");
+    let chassis="";
+    for(const r of chassisResults){
+      const lines=String(r.text||"").toUpperCase().split(/\n+/);
+      for(const line of lines){
+        const candidates=line.match(/[A-ZØ][A-ZØ0-9]{1,7}/g)||[];
+        const candidate=candidates.find(v=>{
+          const compact=v.replace(/Ø/g,"0");
+          return /[A-Z]/.test(compact) && /\d/.test(compact) &&
+            !/WAKO|PORTE|ARRIERE|AVANT|BELONCLE/.test(compact) &&
+            compact.length>=3 && compact.length<=6;
+        });
+        if(candidate){chassis=candidate.replace(/Ø/g,"0").replace(/^P0O/,"P00");break;}
+      }
+      if(chassis) break;
     }
-    const hasP007=results.some(r=>/\bP\s*0{1,2}7\b/i.test(r.text) || normalize(r.text).includes("P007"));
+    if(chassis) $("frameNo").value=chassis;
+
     const parts=[];
     if(order) parts.push("Commande "+order);
-    if($("clientName").value.trim()) parts.push("Client "+$("clientName").value.trim());
-    if(hasP007) parts.push("Code P007 détecté");
+    if(client) parts.push("Client "+client);
+    if(chassis) parts.push("Châssis "+chassis);
     if(parts.length){
       status("scanStatus","Lecture terminée : "+parts.join(" • ")+". Vérifie les champs avant d’enregistrer.");
     }else{
       const best=results.slice().sort((a,b)=>b.confidence-a.confidence)[0];
-      status("scanStatus","La photo est conservée, mais les champs ne sont pas encore reconnus. Meilleur texte OCR : « "+(best?.text||"aucun texte").replace(/\s+/g," ").trim().slice(0,160)+" ». Le scan direct peut mieux fonctionner si l’étiquette remplit l’image.",true);
+      status("scanStatus","Photo conservée, mais les champs ne sont pas assez fiables. Meilleur texte OCR : « "+(best?.text||"aucun texte").replace(/\s+/g," ").trim().slice(0,160)+" ». Cadre l’étiquette entière, bien droite et nette.",true);
     }
   } catch(err) {
     status("scanStatus","La lecture automatique a échoué. La photo originale est conservée. Réessaie avec l’étiquette cadrée de près.",true);
@@ -546,26 +576,27 @@ $("startScanBtn").addEventListener("click",async()=>{
         const shot=c.toDataURL("image/jpeg",0.82);
         const result=await Tesseract.recognize(shot,"eng",{tessedit_pageseg_mode:"11"});
         const raw=(result.data.text||"").toUpperCase();
-        const compact=raw.replace(/\s+/g,"").replace(/[OQ](?=\d)/g,"0").replace(/[IL|](?=\d)/g,"1");
-        const m=compact.match(/26CR\d{5,6}/);
-        if(m && !$("orderNo").value.trim()) $("orderNo").value=m[0];
+        const compact=raw.replace(/[^A-Z0-9]/g,"");
+        const orderMatch=compact.match(/\d{2}[A-Z]{2}\d{4,8}/);
+        if(orderMatch) $("orderNo").value=orderMatch[0];
 
-        // Client attendu : THENON. Tolérer les confusions OCR fréquentes.
-        const letters=raw.replace(/[^A-Z0-9]/g,"");
-        const clientFound=letters.includes("THENON") || letters.includes("THEN0N") ||
-          letters.includes("THENOM") || /TH[E3]N[O0]N/.test(letters) || /THEN[O0][NM]/.test(letters);
-        if(clientFound && !$("clientName").value.trim()) $("clientName").value="THENON";
+        const lines=raw.split(/\n+/).map(x=>x.trim()).filter(Boolean);
+        const clientLine=lines.find(x=>{
+          const letters=x.replace(/[^A-ZÀ-Ÿ]/gi,"");
+          return letters.length>=4 && letters.length<=24 && !/\d/.test(x) &&
+            !/WAKO|PORTE|ARRIERE|AVANT|BELONCLE/i.test(x);
+        });
+        if(clientLine) $("clientName").value=clientLine.replace(/[^A-ZÀ-Ÿ' -]/gi,"").trim();
 
-        // Le numéro de châssis est P007, pas 19433.
-        const chassisFound=/P\s*[O0Ø]\s*[O0Ø]\s*7/.test(raw) ||
-          letters.includes("P007") || letters.includes("POO7") || letters.includes("P0O7");
-        if(chassisFound && !$("frameNo").value.trim()) $("frameNo").value="P007";
+        const chassisMatch=raw.match(/\b[A-ZØ][A-ZØ0-9]{1,5}\b/g)||[];
+        const chassis=chassisMatch.find(x=>/[A-Z]/i.test(x)&&/\d/.test(x)&&! /WAKO|PORTE|ARRIERE|AVANT/i.test(x));
+        if(chassis) $("frameNo").value=chassis.replace(/Ø/g,"0");
 
         const found=[];
-        if(m) found.push("commande "+m[0]);
-        if(clientFound) found.push("client THENON");
-        if(chassisFound) found.push("châssis P007");
-        if(found.length) status("scanStatus","En direct : "+found.join(" • ")+". Vérifie les champs puis capture la photo.");
+        if(orderMatch) found.push("commande "+orderMatch[0]);
+        if(clientLine) found.push("client "+clientLine);
+        if(chassis) found.push("châssis "+chassis);
+        if(found.length) status("scanStatus","En direct : "+found.join(" • ")+". Vérifie les champs.");
       }catch(e){} finally {liveOCRBusy=false;}
     },2500);
     if(window.ZXing && ZXing.BrowserMultiFormatReader){
