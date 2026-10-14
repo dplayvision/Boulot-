@@ -118,17 +118,25 @@ async function runOCR(){
     order=repaired.match(/\d{2}CR\d{4,8}/)?.[0]||"";
    }
 
-   const clientText=await readZone(oriented,.055,.15,.43,.30,"ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+   // Client : lecture plus étroite de la ligne immédiatement sous la commande,
+   // pour éviter de mélanger le nom avec les références imprimées à droite.
+   const clientText=await readZone(oriented,.12,.17,.29,.13,"ABCDEFGHIJKLMNOPQRSTUVWXYZ");
    let client=clientText
-     .replace(/[^A-ZÀ-Ÿ '\-]/g," ")
+     .toUpperCase()
+     .replace(/[^A-ZÀ-Ÿ '\-_]/g," ")
+     .replace(/[_\-]+/g," ")
      .replace(/\s+/g," ")
      .trim();
-   client=client.split(/\n/).map(line=>line.trim()).find(line=>
-     line.length>=3&&line.length<=24&&/[A-Z]{3,}/.test(line)&&
-     !/^(WAKO|PORTE|ARRIERE|AVANT|CODE|BARRE|CHASSIS|COMMANDE)$/.test(line)
-   )||client;
-   if(client.length>24)client=client.slice(0,24).trim();
 
+   // Garde les mots alphabétiques plausibles et retire les fragments très courts.
+   const ignoredClientWords=/^(WAKO|PORTE|ARRIERE|AVANT|CODE|BARRE|CHASSIS|COMMANDE|SOUS|SOL|FAR|BUREAU|LI)$/;
+   const clientWords=client.split(/\s+/).filter(word=>
+     word.length>=3 &&
+     /[A-Z]{3,}/.test(word) &&
+     !ignoredClientWords.test(word)
+   );
+   client=clientWords.join(" ").trim();
+   if(client.length>30)client=client.slice(0,30).trim();
    const chassisText=await readZone(oriented,.76,.08,.22,.28,"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
    // Le format varie : le code est recherché uniquement dans la zone supérieure droite.
    const chassisTokens=chassisText.toUpperCase()
