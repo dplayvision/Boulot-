@@ -77,9 +77,30 @@ async function runOCR(){
   }
   const orderText=await readZone(.055,.09,.48,.19,"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ");
   let order=orderText.replace(/\s/g,"").replace(/[ＯО]/g,"0").replace(/[^A-Z0-9]/g,"").match(/\d{2}CR\d{4,8}/)?.[0]||"";
-  const clientText=await readZone(.055,.235,.28,.17,"ABCDEFGHIJKLMNOPQRSTUVWXYZ");
-  let client=clientText.replace(/[^A-ZÀ-Ÿ '-]/g," ").replace(/\s+/g," ").trim();
-  client=client.split(/\n/).map(line=>line.trim()).find(line=>line.length>=3&&line.length<=24&&/[A-Z]/.test(line))||"";
+  // 2. Client : zone élargie juste sous le numéro de commande.
+  const clientText = await readZone(
+    0.055, 0.20, 0.38, 0.22,
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  );
+
+  let client = clientText
+    .toUpperCase()
+    .replace(/[^A-ZÀ-Ÿ '\\-]/g, " ")
+    .replace(/\\s+/g, " ")
+    .trim();
+
+  const clientCandidates = client
+    .split(/\\n/)
+    .map(line => line.trim())
+    .filter(line =>
+      line.length >= 3 &&
+      line.length <= 24 &&
+      /[A-Z]{3,}/.test(line) &&
+      !/^(WAKO|PORTE|ARRIERE|AVANT|CODE|BARRE|CHASSIS|COMMANDE)$/.test(line)
+    );
+
+  client = clientCandidates[0] || client;
+  if (client.length > 24) client = client.slice(0, 24).trim();
   const chassisText=await readZone(.82,.10,.16,.23,"P0123456789");
   const chassis=chassisText.replace(/[^A-Z0-9]/g,"").replace(/[OQ]/g,"0").match(/P\d{3}/)?.[0]||"";
   if(order)$("orderNo").value=order;if(client)$("clientName").value=client;if(chassis)$("frameNo").value=chassis;
