@@ -93,14 +93,45 @@ async function runOCR(){
    const sw=Math.max(1,Math.round(oriented.width*w)),sh=Math.max(1,Math.round(oriented.height*h));
    const canvas=document.createElement("canvas");
    canvas.width=sw*3;canvas.height=sh*3;
-   const ctx=canvas.getContext("2d");
+   const ctx=canvas.getContext("2d",{willReadFrequently:true});
    ctx.fillStyle="#fff";ctx.fillRect(0,0,canvas.width,canvas.height);
    ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality="high";
    ctx.drawImage(oriented,sx,sy,sw,sh,0,0,canvas.width,canvas.height);
+
    const options={preserve_interword_spaces:"1",tessedit_pageseg_mode:"7"};
    if(whitelist)options.tessedit_char_whitelist=whitelist;
-   const result=await Tesseract.recognize(canvas.toDataURL("image/png"),"eng",options);
-   return String(result.data.text||"").toUpperCase().trim();
+
+   // Méthode existante : OCR de la zone agrandie.
+   const originalResult=await Tesseract.recognize(canvas.toDataURL("image/png"),"eng",options);
+   let bestText=String(originalResult.data.text||"").toUpperCase().trim();
+   let bestConfidence=Number(originalResult.data.confidence||0);
+
+   // Méthode complémentaire : contraste + seuil noir/blanc.
+   // Elle est essayée sans supprimer la méthode OCR existante.
+   const processed=document.createElement("canvas");
+   processed.width=canvas.width;processed.height=canvas.height;
+   const pctx=processed.getContext("2d",{willReadFrequently:true});
+   pctx.drawImage(canvas,0,0);
+   const imageData=pctx.getImageData(0,0,processed.width,processed.height);
+   const pixels=imageData.data;
+   for(let i=0;i<pixels.length;i+=4){
+     const gray=0.299*pixels[i]+0.587*pixels[i+1]+0.114*pixels[i+2];
+     const value=gray<155?0:255;
+     pixels[i]=pixels[i+1]=pixels[i+2]=value;
+     pixels[i+3]=255;
+   }
+   pctx.putImageData(imageData,0,0);
+
+   const processedResult=await Tesseract.recognize(processed.toDataURL("image/png"),"eng",options);
+   const processedText=String(processedResult.data.text||"").toUpperCase().trim();
+   const processedConfidence=Number(processedResult.data.confidence||0);
+
+   // Pour la commande et le code, préférer un résultat correspondant à une référence plausible.
+   // Pour le client, utiliser le texte de la variante la mieux reconnue.
+   if(processedConfidence>bestConfidence && processedText){
+     bestText=processedText;
+   }
+   return bestText;
   }
 
   let best={order:"",client:"",chassis:"",angle:null};
@@ -120,7 +151,7 @@ async function runOCR(){
 
    // Client : lecture plus étroite de la ligne immédiatement sous la commande,
    // pour éviter de mélanger le nom avec les références imprimées à droite.
-   const clientText=await readZone(oriented,.12,.17,.29,.13,"ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+   const clientText=await readZone(oriented,.12,.205,.34,.12,"ABCDEFGHIJKLMNOPQRSTUVWXYZ");
    let client=clientText
      .toUpperCase()
      .replace(/[^A-ZÀ-Ÿ '\-_]/g," ")
